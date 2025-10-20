@@ -1,0 +1,57 @@
+[project]
+name = "uwscli"
+version = "0.1.0"
+description = "Uni-Wireless-Sync: wireless control toolkit for TL LCD fan hubs"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {file = "LICENSE"}
+authors = [{name = "Study Hsueh"}]
+keywords = ["lian-li", "uni-fan", "wireless", "lcd"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: System Administrators",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: System :: Hardware :: Universal Serial Bus (USB)",
+]
+dependencies = [
+  "hidapi>=0.14",
+  "pyusb>=1.2",
+  "pycryptodomex>=3.17",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.0",
+  "pytest-cov>=4.0",
+  "ruff>=0.5",
+  "black>=24.0",
+  "mypy>=1.8",
+]
+images = ["Pillow>=10.0"]
+
+[project.urls]
+Homepage = "https://github.com/phstudy/tlv2-lcd"
+Issues = "https://github.com/phstudy/tlv2-lcd/issues"
+
+[project.scripts]
+uws = "uwscli.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["uwscli", "uwscli.*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+addopts = "-ra"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
