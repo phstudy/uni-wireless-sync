@@ -1,6 +1,6 @@
 """UWS CLI package."""
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "cli",
@@ -10,4 +10,5 @@ __all__ = [
     "wireless",
     "structs",
     "usbutil",
+    "tl_effects",
 ]

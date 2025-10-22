@@ -1,6 +1,6 @@
 [project]
 name = "uwscli"
-version = "0.2.0"
+version = "0.3.0"
 description = "Uni-Wireless-Sync: wireless control toolkit for TL LCD fan hubs"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -47,6 +47,9 @@ uws = "uwscli.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["uwscli", "uwscli.*"]
+
+[tool.setuptools.package-data]
+"uwscli" = ["data/twinkle.bin"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

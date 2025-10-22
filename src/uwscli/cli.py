@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import time
 from importlib import metadata
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple, cast
 
-from . import lcd, tlcontroller, wireless
+from . import lcd, tl_effects, tlcontroller, wireless
 from .logging_utils import configure_logging
 from .structs import LCDControlSetting, ScreenRotation, clamp_pwm_values
 
@@ -146,6 +147,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Sequence index used by the RF command (default: 1)",
     )
 
+    effect_names = sorted(effect.name.lower() for effect in tl_effects.TLEffects)
+
     set_led_parser = fan_sub.add_parser(
         "set-led", help="Set LED effects on wireless hubs"
     )
@@ -158,7 +161,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     set_led_parser.add_argument(
         "--mode",
-        choices=["static", "rainbow", "frames"],
+        choices=["static", "rainbow", "frames", "effect", "random-effect"],
         default="static",
         help="LED effect mode (default: static)",
     )
@@ -169,12 +172,6 @@ def build_parser() -> argparse.ArgumentParser:
     set_led_parser.add_argument(
         "--color-list",
         help="Semicolon separated RGB triples for per-LED or per-fan colors in static mode",
-    )
-    set_led_parser.add_argument(
-        "--dict-size",
-        type=int,
-        default=4096,
-        help="Dictionary size used for TinyUZ compression (default: 4096)",
     )
     set_led_parser.add_argument(
         "--frames",
@@ -192,6 +189,30 @@ def build_parser() -> argparse.ArgumentParser:
         "--frames-file",
         type=Path,
         help="JSON file describing animation frames for frames mode",
+    )
+    set_led_parser.add_argument(
+        "--effect",
+        choices=effect_names,
+        help="TL effect name to apply when mode=effect",
+    )
+    set_led_parser.add_argument(
+        "--effect-brightness",
+        type=int,
+        default=255,
+        help="Brightness (0-255) applied when mode=effect (default: 255)",
+    )
+    set_led_parser.add_argument(
+        "--effect-direction",
+        type=int,
+        choices=[0, 1],
+        default=1,
+        help="Direction for TL effects (0=reverse, 1=forward; default: 1)",
+    )
+    set_led_parser.add_argument(
+        "--effect-scope",
+        choices=["front", "behind", "both"],
+        default="both",
+        help="Fan segment for TL effects (front, behind, or both; default: both)",
     )
 
     bind_parser = fan_sub.add_parser(
@@ -498,6 +519,9 @@ def handle_fan(args: argparse.Namespace) -> None:
             else:
                 targets = [args.mac]
             results: List[Dict[str, Any]] = []
+            selected_random_effect = None
+            if args.mode == "random-effect":
+                selected_random_effect = random.choice(list(tl_effects.TLEffects))
             with wireless.WirelessTransceiver() as tx:
                 for mac in targets:
                     text: str
@@ -517,12 +541,10 @@ def handle_fan(args: argparse.Namespace) -> None:
                             mac,
                             base_color,
                             color_list=colors,
-                            dict_size=args.dict_size,
                         )
                         payload = {
                             "mac": mac,
                             "mode": "static",
-                            "dict_size": args.dict_size,
                         }
                         if base_color is not None:
                             payload["color"] = list(base_color)
@@ -536,16 +558,78 @@ def handle_fan(args: argparse.Namespace) -> None:
                             mac,
                             frames=frames,
                             interval_ms=interval_ms,
-                            dict_size=args.dict_size,
                         )
                         payload = {
                             "mac": mac,
                             "mode": "rainbow",
                             "frames": frames,
                             "interval_ms": interval_ms,
-                            "dict_size": args.dict_size,
                         }
                         text = f"Applied rainbow LED effect to {mac}"
+                    elif args.mode == "effect":
+                        if not args.effect:
+                            raise SystemExit(
+                                "--effect must be provided when mode=effect"
+                            )
+                        effect = tl_effects.TLEffects[args.effect.upper()]
+                        brightness = max(0, min(255, args.effect_brightness))
+                        direction = int(args.effect_direction)
+                        if args.effect_scope == "front":
+                            tb = 0
+                        elif args.effect_scope == "behind":
+                            tb = 1
+                        else:
+                            tb = None
+                        interval_ms = max(1, args.interval_ms)
+                        tx.set_led_effect(
+                            mac,
+                            effect,
+                            tb=tb,
+                            brightness=brightness,
+                            direction=direction,
+                            interval_ms=interval_ms,
+                        )
+                        payload = {
+                            "mac": mac,
+                            "mode": "effect",
+                            "effect": effect.name,
+                            "brightness": brightness,
+                            "direction": direction,
+                            "scope": args.effect_scope,
+                            "interval_ms": interval_ms,
+                        }
+                        text = f"Applied TL effect {effect.name} to {mac}"
+                    elif args.mode == "random-effect":
+                        brightness = max(0, min(255, args.effect_brightness))
+                        direction = int(args.effect_direction)
+                        if args.effect_scope == "front":
+                            tb = 0
+                        elif args.effect_scope == "behind":
+                            tb = 1
+                        else:
+                            tb = None
+                        effect = selected_random_effect or random.choice(
+                            list(tl_effects.TLEffects)
+                        )
+                        interval_ms = max(1, args.interval_ms)
+                        tx.set_led_effect(
+                            mac,
+                            effect,
+                            tb=tb,
+                            brightness=brightness,
+                            direction=direction,
+                            interval_ms=interval_ms,
+                        )
+                        payload = {
+                            "mac": mac,
+                            "mode": "random-effect",
+                            "effect": effect.name,
+                            "brightness": brightness,
+                            "direction": direction,
+                            "scope": args.effect_scope,
+                            "interval_ms": interval_ms,
+                        }
+                        text = f"Applied random TL effect {effect.name} to {mac}"
                     else:
                         if not args.frames_file:
                             raise SystemExit(
@@ -557,24 +641,29 @@ def handle_fan(args: argparse.Namespace) -> None:
                             mac,
                             frame_list,
                             interval_ms=interval_ms,
-                            dict_size=args.dict_size,
                         )
                         payload = {
                             "mac": mac,
                             "mode": "frames",
                             "frames": len(frame_list),
                             "interval_ms": interval_ms,
-                            "dict_size": args.dict_size,
                         }
                         text = f"Applied custom LED frames to {mac}"
                     results.append(payload)
             overall = {
                 "targets": targets,
                 "mode": args.mode,
-                "dict_size": args.dict_size,
             }
             if args.mode == "rainbow":
                 overall["frames"] = max(1, args.frames)
+                overall["interval_ms"] = max(1, args.interval_ms)
+            elif args.mode in {"effect", "random-effect"}:
+                if args.mode == "random-effect":
+                    overall["effect"] = (
+                        selected_random_effect.name if selected_random_effect else None
+                    )
+                else:
+                    overall["effect"] = args.effect.upper() if args.effect else None
                 overall["interval_ms"] = max(1, args.interval_ms)
             elif args.mode == "frames":
                 overall["frames_file"] = str(args.frames_file)

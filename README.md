@@ -23,10 +23,7 @@ Other Uni Fan series are currently not supported.
 - Send one-shot PWM commands to TL wireless fans over the 2.4 GHz dongle.
 - Bind or unbind wireless hubs against the active master controller.
 - Toggle motherboard PWM sync mode for one hub or every bound hub.
-
-## Roadmap
-
-- Broadcast static RGB payloads to wireless hubs (CLI command not yet implemented).
+- Broadcast static RGB payloads to wireless hubs (experimental).
 
 ## Installation
 
@@ -73,7 +70,29 @@ uws fan pwm-sync --mac aa:bb:cc:dd:ee:ff --once
 - `uws lcd control --serial <usb-serial> [--mode show-jpg|show-app-sync|lcd-test] [--jpg-index N] [--brightness 0-100] [--fps N] [--rotation 0|90|180|270] [--test-color R,G,B]` – send an `LCDControlSetting` payload.
 - `uws fan list` – fetch a snapshot of bound wireless devices via the RF receiver.
 - `uws fan set-fan --mac <aa:bb:..> --pwm <0-255>` – send a single shot PWM update to the matching wireless hub using the RF sender.
-- `uws fan set-led --mac <aa:bb:..> --mode static|rainbow|frames` – apply LED effects (experimental).
+- `uws fan set-led --mac <aa:bb:..> --mode static|rainbow|frames|effect|random-effect` – apply wireless LED effects (**experimental**).
+
+### `uws fan set-led` modes
+
+- `static`: requires `--color R,G,B` or `--color-list R,G,B;...` to paint the LED strip once.
+- `rainbow`: procedural rainbow; optional `--frames N` (default 24) and `--interval-ms` (default 50).
+- `frames`: feed a JSON animation via `--frames-file`. Each frame is an array of `[R, G, B]` triples; see `examples/tl_frames_sample.json` for a minimal illustration (the CLI will pad or truncate per device LED count).
+- `effect`: drives any of the 29 TL presets. Choose an effect with `--effect <name>` (e.g. `twinkle`, `meteor_shower`), adjust brightness 0‑255 via `--effect-brightness`, pick direction with `--effect-direction 0|1`, and select which segment to update using `--effect-scope front|behind|both` (default `both`).
+- `random-effect`: picks a random preset each time; accepts the same brightness/direction/scope flags as `effect`.
+
+  Available effect names (case-insensitive): `rainbow`, `rainbow_morph`, `static_color`, `breathing`, `runway`, `meteor`, `color_cycle`, `staggered`, `tide`, `mixing`, `voice`, `door`, `render`, `ripple`, `reflect`, `tail_chasing`, `paint`, `ping_pong`, `stack`, `cover_cycle`, `wave`, `racing`, `lottery`, `intertwine`, `meteor_shower`, `collide`, `electric_current`, `kaleidoscope`, `twinkle`.
+
+  Example:
+
+  ```
+  uws fan set-led --mac aa:bb:cc:dd:ee:ff --mode effect --effect twinkle --effect-brightness 180 --effect-direction 0 --effect-scope both
+  ```
+
+  Random example:
+
+  ```
+  uws fan set-led --mac aa:bb:cc:dd:ee:ff --mode random-effect --effect-brightness 200 --effect-direction 1
+  ```
 - `uws fan pwm-sync --all|--mac [--once]` – mirror motherboard PWM output to bound hubs (looping by default, single iteration with `--once`).
 
 ## Dependencies

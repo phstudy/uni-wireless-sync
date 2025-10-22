@@ -6,7 +6,7 @@ SRC_ROOT = Path(__file__).resolve().parents[1].parent / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from uwscli import cli, lcd, tlcontroller, wireless  # noqa: E402
+from uwscli import cli, lcd, tl_effects, tlcontroller, wireless  # noqa: E402
 
 
 class StubTransceiver:
@@ -19,6 +19,7 @@ class StubTransceiver:
         self.calls = []
         self.led_static_calls = []
         self.led_rainbow_calls = []
+        self.led_effect_calls = []
         StubTransceiver.instances.append(self)
 
     def __enter__(self):
@@ -35,34 +36,52 @@ class StubTransceiver:
             )
         return self.snapshot
 
-    def set_led_static(self, mac, color, color_list=None, dict_size=4096, **kwargs):
+    def set_led_static(self, mac, color, color_list=None, **kwargs):
         self.led_static_calls.append(
             {
                 "mac": mac,
                 "color": color,
                 "color_list": color_list,
-                "dict_size": dict_size,
             }
         )
 
-    def set_led_rainbow(self, mac, frames=24, interval_ms=50, dict_size=4096, **kwargs):
+    def set_led_rainbow(self, mac, frames=24, interval_ms=50, **kwargs):
         self.led_rainbow_calls.append(
             {
                 "mac": mac,
                 "frames": frames,
                 "interval_ms": interval_ms,
-                "dict_size": dict_size,
             }
         )
 
-    def set_led_frames(self, mac, frames, interval_ms=50, dict_size=4096, **kwargs):
+    def set_led_frames(self, mac, frames, interval_ms=50, **kwargs):
         self.led_rainbow_calls.append(
             {
                 "mac": mac,
                 "frames": frames,
                 "interval_ms": interval_ms,
-                "dict_size": dict_size,
                 "mode": "frames",
+            }
+        )
+
+    def set_led_effect(
+        self,
+        mac,
+        effect,
+        tb=0,
+        brightness=255,
+        direction=1,
+        interval_ms=50,
+        **kwargs,
+    ):
+        self.led_effect_calls.append(
+            {
+                "mac": mac,
+                "effect": getattr(effect, "name", str(effect)),
+                "tb": tb,
+                "brightness": brightness,
+                "direction": direction,
+                "interval_ms": interval_ms,
             }
         )
 
@@ -299,7 +318,6 @@ def test_fan_set_led_cli(monkeypatch, capsys):
     assert record["mac"] == "aa:bb:cc:dd:ee:ff"
     assert record["color"] == (255, 128, 0)
     assert record["color_list"] is None
-    assert record["dict_size"] == 4096
 
 
 def test_fan_set_led_color_list_cli(monkeypatch, capsys):
@@ -339,6 +357,201 @@ def test_fan_set_led_color_list_cli(monkeypatch, capsys):
     record = StubTransceiver.instances[-1].led_static_calls[-1]
     assert record["color"] is None
     assert record["color_list"] == [(255, 0, 0), (0, 0, 255)]
+
+
+def test_fan_set_led_effect_cli(monkeypatch, capsys):
+    StubTransceiver.instances.clear()
+    device = wireless.WirelessDeviceInfo(
+        mac="aa:bb:cc:dd:ee:ff",
+        master_mac="11:22:33:44:55:66",
+        channel=3,
+        rx_type=2,
+        device_type=1,
+        fan_count=4,
+        pwm_values=(0, 0, 0, 0),
+        fan_rpm=(0, 0, 0, 0),
+        command_sequence=1,
+        raw=bytes(42),
+    )
+    snapshot = wireless.WirelessSnapshot(devices=[device], raw=b"")
+
+    def factory(*args, **kwargs):
+        return StubTransceiver(snapshot=snapshot)
+
+    monkeypatch.setattr(wireless, "WirelessTransceiver", factory)
+
+    cli.main(
+        [
+            "fan",
+            "set-led",
+            "--mac",
+            "aa:bb:cc:dd:ee:ff",
+            "--mode",
+            "effect",
+            "--effect",
+            "twinkle",
+            "--effect-brightness",
+            "128",
+            "--effect-direction",
+            "0",
+            "--effect-scope",
+            "behind",
+            "--interval-ms",
+            "60",
+        ]
+    )
+
+    out = capsys.readouterr().out.strip()
+    assert "Applied TL effect TWINKLE" in out
+    record = StubTransceiver.instances[-1].led_effect_calls[-1]
+    assert record["mac"] == "aa:bb:cc:dd:ee:ff"
+    assert record["effect"] == "TWINKLE"
+    assert record["tb"] == 1
+    assert record["brightness"] == 128
+    assert record["direction"] == 0
+    assert record["interval_ms"] == 60
+
+
+def test_fan_set_led_effect_both_cli(monkeypatch, capsys):
+    StubTransceiver.instances.clear()
+    device = wireless.WirelessDeviceInfo(
+        mac="aa:bb:cc:dd:ee:ff",
+        master_mac="11:22:33:44:55:66",
+        channel=3,
+        rx_type=2,
+        device_type=1,
+        fan_count=4,
+        pwm_values=(0, 0, 0, 0),
+        fan_rpm=(0, 0, 0, 0),
+        command_sequence=1,
+        raw=bytes(42),
+    )
+    snapshot = wireless.WirelessSnapshot(devices=[device], raw=b"")
+
+    def factory(*args, **kwargs):
+        return StubTransceiver(snapshot=snapshot)
+
+    monkeypatch.setattr(wireless, "WirelessTransceiver", factory)
+
+    cli.main(
+        [
+            "fan",
+            "set-led",
+            "--mac",
+            "aa:bb:cc:dd:ee:ff",
+            "--mode",
+            "effect",
+            "--effect",
+            "ripple",
+            "--effect-scope",
+            "both",
+        ]
+    )
+
+    out = capsys.readouterr().out.strip()
+    assert "Applied TL effect RIPPLE" in out
+    record = StubTransceiver.instances[-1].led_effect_calls[-1]
+    assert record["mac"] == "aa:bb:cc:dd:ee:ff"
+    assert record["effect"] == "RIPPLE"
+    assert record["tb"] is None
+
+
+def test_fan_set_led_random_effect_cli(monkeypatch, capsys):
+    StubTransceiver.instances.clear()
+    device = wireless.WirelessDeviceInfo(
+        mac="aa:bb:cc:dd:ee:ff",
+        master_mac="11:22:33:44:55:66",
+        channel=3,
+        rx_type=2,
+        device_type=1,
+        fan_count=4,
+        pwm_values=(0, 0, 0, 0),
+        fan_rpm=(0, 0, 0, 0),
+        command_sequence=1,
+        raw=bytes(42),
+    )
+    snapshot = wireless.WirelessSnapshot(devices=[device], raw=b"")
+
+    def factory(*args, **kwargs):
+        return StubTransceiver(snapshot=snapshot)
+
+    monkeypatch.setattr(wireless, "WirelessTransceiver", factory)
+    monkeypatch.setattr(cli.random, "choice", lambda seq: tl_effects.TLEffects.RIPPLE)
+
+    cli.main(
+        [
+            "fan",
+            "set-led",
+            "--mac",
+            "aa:bb:cc:dd:ee:ff",
+            "--mode",
+            "random-effect",
+            "--effect-brightness",
+            "200",
+        ]
+    )
+
+    out = capsys.readouterr().out.strip()
+    assert "Applied random TL effect RIPPLE" in out
+    record = StubTransceiver.instances[-1].led_effect_calls[-1]
+    assert record["mac"] == "aa:bb:cc:dd:ee:ff"
+    assert record["effect"] == "RIPPLE"
+    assert record["tb"] is None
+    assert record["brightness"] == 200
+
+
+def test_fan_set_led_random_effect_all_cli(monkeypatch, capsys):
+    StubTransceiver.instances.clear()
+    device_a = wireless.WirelessDeviceInfo(
+        mac="aa:bb:cc:dd:ee:ff",
+        master_mac="11:22:33:44:55:66",
+        channel=3,
+        rx_type=2,
+        device_type=1,
+        fan_count=4,
+        pwm_values=(0, 0, 0, 0),
+        fan_rpm=(0, 0, 0, 0),
+        command_sequence=1,
+        raw=bytes(42),
+    )
+    device_b = wireless.WirelessDeviceInfo(
+        mac="de:ad:be:ef:00:01",
+        master_mac="11:22:33:44:55:66",
+        channel=3,
+        rx_type=3,
+        device_type=1,
+        fan_count=4,
+        pwm_values=(0, 0, 0, 0),
+        fan_rpm=(0, 0, 0, 0),
+        command_sequence=2,
+        raw=bytes(42),
+    )
+    snapshot = wireless.WirelessSnapshot(devices=[device_a, device_b], raw=b"")
+
+    def factory(*args, **kwargs):
+        return StubTransceiver(snapshot=snapshot)
+
+    monkeypatch.setattr(wireless, "WirelessTransceiver", factory)
+    monkeypatch.setattr(
+        cli.random, "choice", lambda seq: tl_effects.TLEffects.STAGGERED
+    )
+
+    cli.main(
+        [
+            "fan",
+            "set-led",
+            "--all",
+            "--mode",
+            "random-effect",
+        ]
+    )
+
+    out = capsys.readouterr().out.strip()
+    assert '"effect": "STAGGERED"' in out
+    # The last stub is the one used for sends (after enumeration)
+    record_calls = StubTransceiver.instances[-1].led_effect_calls
+    assert len(record_calls) == 2
+    assert {call["effect"] for call in record_calls} == {"STAGGERED"}
 
 
 def test_fan_set_led_rainbow_cli(monkeypatch, capsys):
@@ -384,7 +597,6 @@ def test_fan_set_led_rainbow_cli(monkeypatch, capsys):
     assert record["mac"] == "aa:bb:cc:dd:ee:ff"
     assert record["frames"] == 12
     assert record["interval_ms"] == 80
-    assert record["dict_size"] == 4096
     assert "mode" not in record
 
 
@@ -443,7 +655,6 @@ def test_fan_set_led_frames_cli(monkeypatch, tmp_path, capsys):
         [(0, 0, 255), (255, 255, 0)],
     ]
     assert record["interval_ms"] == 90
-    assert record["dict_size"] == 4096
     assert record["mode"] == "frames"
 
 

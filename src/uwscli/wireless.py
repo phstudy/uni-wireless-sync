@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple, cast
 
 from . import tinyuz
+from .tl_effects import TLEffectGenerator, TLEffects
 from .structs import WirelessDeviceInfo, clamp_pwm_values
 from .system_usb import find_devices_by_vid_pid
 from .usbutil import USBEndpointDevice, USBError
@@ -30,6 +31,8 @@ MAX_DEVICES_PER_PAGE = 10
 LED_DATA_CHUNK = 220
 FIRST_LED_PACKET_DATA_OFFSET = 34
 FIRST_LED_PACKET_DATA_MAX = RF_PAYLOAD_SIZE - FIRST_LED_PACKET_DATA_OFFSET
+
+_DEFAULT_DICT_SIZE = 4096
 
 
 class WirelessError(RuntimeError):
@@ -169,7 +172,6 @@ class WirelessTransceiver:
         *,
         color_list: Optional[Sequence[Tuple[int, int, int]]] = None,
         broadcast: bool = False,
-        dict_size: int = 4096,
     ) -> None:
         snapshot = self.list_devices()
         target = next(
@@ -198,7 +200,7 @@ class WirelessTransceiver:
             rgb,
             led_count=led_count,
             total_frames=1,
-            dict_size=dict_size,
+            dict_size=_DEFAULT_DICT_SIZE,
             broadcast=broadcast,
             interval_ms=None,
         )
@@ -210,7 +212,6 @@ class WirelessTransceiver:
         frames: int = 24,
         interval_ms: int = 50,
         broadcast: bool = False,
-        dict_size: int = 4096,
     ) -> None:
         snapshot = self.list_devices()
         target = next(
@@ -232,9 +233,83 @@ class WirelessTransceiver:
             data,
             led_count=led_count,
             total_frames=frames,
-            dict_size=dict_size,
+            dict_size=_DEFAULT_DICT_SIZE,
             broadcast=broadcast,
             interval_ms=interval_ms,
+        )
+
+    def set_led_effect(
+        self,
+        mac: str,
+        effect: TLEffects,
+        *,
+        tb: Optional[int] = 0,
+        brightness: int = 255,
+        direction: int = 1,
+        interval_ms: Optional[int] = 50,
+        broadcast: bool = False,
+    ) -> None:
+        snapshot = self.list_devices()
+        target = next(
+            (dev for dev in snapshot.devices if dev.mac.lower() == mac.lower()), None
+        )
+        if target is None:
+            raise WirelessError(f"Device with MAC {mac} not found")
+        if not target.is_bound:
+            raise WirelessError(
+                "Device is not bound to a master controller; cannot send LED data"
+            )
+
+        generator = TLEffectGenerator()
+        fan_slots = target.fan_count if target.fan_count > 0 else 0
+        if fan_slots <= 0:
+            hint_leds = _infer_led_count(target)
+            fan_slots = max(1, hint_leds // TLEffectGenerator.LEDS_PER_FAN)
+        fan_slots = max(1, min(4, fan_slots))
+
+        brightness = max(0, min(255, int(brightness)))
+        direction = 0 if direction < 0 else (1 if direction > 1 else int(direction))
+
+        if tb is None:
+            front_frames = generator.generate(
+                effect, 0, fan_slots, brightness, direction
+            )
+            back_frames = generator.generate(
+                effect, 1, fan_slots, brightness, direction
+            )
+            frames = self._merge_half_frames(front_frames, back_frames)
+        else:
+            frames = generator.generate(effect, tb, fan_slots, brightness, direction)
+        if not frames:
+            raise WirelessError("Generated TL effect produced no frames")
+
+        leds_per_frame = len(frames[0][0])
+        hint_leds = _infer_led_count(target)
+        if leds_per_frame != hint_leds:
+            logger.debug(
+                "Generated TL effect length %s differs from inferred LED count %s for %s",
+                leds_per_frame,
+                hint_leds,
+                mac,
+            )
+
+        buffer = bytearray()
+        for frame in frames:
+            if len(frame[0]) != leds_per_frame:
+                raise WirelessError("Inconsistent frame lengths in TL effect output")
+            for led in range(leds_per_frame):
+                buffer.extend((frame[0][led], frame[1][led], frame[2][led]))
+
+        interval = None if interval_ms is None else max(1, int(interval_ms))
+        self._transmit_led_effect(
+            target,
+            snapshot,
+            bytes(buffer),
+            led_count=leds_per_frame,
+            total_frames=len(frames),
+            dict_size=_DEFAULT_DICT_SIZE,
+            broadcast=broadcast,
+            interval_ms=interval,
         )
 
     def set_led_frames(
@@ -244,7 +319,6 @@ class WirelessTransceiver:
         *,
         interval_ms: int = 50,
         broadcast: bool = False,
-        dict_size: int = 4096,
     ) -> None:
         if not frames:
             raise WirelessError("Frames sequence cannot be empty")
@@ -271,7 +345,7 @@ class WirelessTransceiver:
             bytes(buffer),
             led_count=led_count,
             total_frames=len(frames),
-            dict_size=dict_size,
+            dict_size=_DEFAULT_DICT_SIZE,
             broadcast=broadcast,
             interval_ms=interval_ms,
         )
@@ -305,10 +379,10 @@ class WirelessTransceiver:
 
         compressed = tinyuz.compress_led_payload(raw_rgb, dict_size=dict_size)
         compressed_len = len(compressed)
-        first_chunk_len = min(compressed_len, FIRST_LED_PACKET_DATA_MAX)
-        remaining = compressed_len - first_chunk_len
-        extra_packets = math.ceil(remaining / LED_DATA_CHUNK) if remaining > 0 else 0
-        total_packets = 1 + extra_packets
+        if not compressed_len:
+            raise WirelessError("LED payload is empty after compression")
+        data_packets = math.ceil(compressed_len / LED_DATA_CHUNK)
+        total_packets = 1 + data_packets
         if total_packets > 255:
             raise WirelessError("LED payload is too large to transmit")
 
@@ -316,6 +390,9 @@ class WirelessTransceiver:
         master_mac = _mac_to_bytes(target.master_mac)
         effect_index = _generate_effect_index()
         channel = target.channel if target.channel else snapshot.devices[0].channel
+        send_interval = interval_ms if interval_ms is not None else 50
+        if send_interval < 0:
+            send_interval = 0
 
         logger.info(
             "Transmitting LED effect to %s (leds=%d frames=%d packets=%d)",
@@ -346,18 +423,22 @@ class WirelessTransceiver:
                 payload[25] = (total_frames >> 8) & 0xFF
                 payload[26] = total_frames & 0xFF
                 payload[27] = led_count & 0xFF
-                if interval_ms is not None:
-                    payload[32] = (interval_ms >> 8) & 0xFF
-                    payload[33] = interval_ms & 0xFF
-
-                chunk_len = first_chunk_len
-                if chunk_len:
-                    chunk = compressed[data_offset : data_offset + chunk_len]
-                    payload[
-                        FIRST_LED_PACKET_DATA_OFFSET : FIRST_LED_PACKET_DATA_OFFSET
-                        + chunk_len
-                    ] = chunk
-                    data_offset += chunk_len
+                payload[32] = (send_interval >> 8) & 0xFF
+                payload[33] = send_interval & 0xFF
+                payload[34] = 0
+                payload[35] = 0
+                payload[36] = 0
+                payload[37] = 0
+                payload[38] = 0
+                payload[39] = 0
+                first_chunk_len = min(
+                    FIRST_LED_PACKET_DATA_MAX, compressed_len - data_offset
+                )
+                if first_chunk_len:
+                    chunk = compressed[data_offset : data_offset + first_chunk_len]
+                    start = FIRST_LED_PACKET_DATA_OFFSET
+                    payload[start : start + first_chunk_len] = chunk
+                    data_offset += first_chunk_len
             else:
                 chunk_len = min(LED_DATA_CHUNK, compressed_len - data_offset)
                 if chunk_len:
@@ -370,6 +451,41 @@ class WirelessTransceiver:
                 for _ in range(3):
                     time.sleep(0.02)
                     self._send_rf_data(channel, target.rx_type, payload)
+            if packet_index < total_packets - 1:
+                time.sleep(0.01)
+
+    @staticmethod
+    def _merge_half_frames(
+        front: Sequence[Sequence[Sequence[int]]],
+        back: Sequence[Sequence[Sequence[int]]],
+    ) -> List[List[List[int]]]:
+        if not front and not back:
+            return []
+        if not front:
+            return [[list(channel) for channel in frame] for frame in back]
+        if not back:
+            return [[list(channel) for channel in frame] for frame in front]
+        total = max(len(front), len(back))
+        merged: List[List[List[int]]] = []
+        for index in range(total):
+            frame_front = front[index % len(front)]
+            frame_back = back[index % len(back)]
+            combined = [
+                list(frame_front[0]),
+                list(frame_front[1]),
+                list(frame_front[2]),
+            ]
+            led_count = len(frame_back[0])
+            for led in range(led_count):
+                r = frame_back[0][led]
+                g = frame_back[1][led]
+                b = frame_back[2][led]
+                if r or g or b:
+                    combined[0][led] = r
+                    combined[1][led] = g
+                    combined[2][led] = b
+            merged.append(combined)
+        return merged
 
     def bind_device(
         self,
