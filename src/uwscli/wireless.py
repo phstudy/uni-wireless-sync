@@ -6,8 +6,9 @@ import logging
 import math
 import time
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple, cast
 
+from . import tinyuz
 from .structs import WirelessDeviceInfo, clamp_pwm_values
 from .system_usb import find_devices_by_vid_pid
 from .usbutil import USBEndpointDevice, USBError
@@ -26,6 +27,9 @@ RF_CHUNK_SIZE = 60
 RF_PAYLOAD_SIZE = 240
 RF_PAGE_STRIDE = 434
 MAX_DEVICES_PER_PAGE = 10
+LED_DATA_CHUNK = 220
+FIRST_LED_PACKET_DATA_OFFSET = 34
+FIRST_LED_PACKET_DATA_MAX = RF_PAYLOAD_SIZE - FIRST_LED_PACKET_DATA_OFFSET
 
 
 class WirelessError(RuntimeError):
@@ -36,6 +40,9 @@ class WirelessError(RuntimeError):
 class WirelessSnapshot:
     devices: List[WirelessDeviceInfo]
     raw: bytes
+
+    def motherboard_pwm(self) -> Optional[int]:
+        return _extract_motherboard_pwm(self.raw)
 
 
 class WirelessTransceiver:
@@ -102,11 +109,39 @@ class WirelessTransceiver:
         sequence_index: int = 1,
     ) -> None:
         snapshot = self.list_devices()
-        target = next((dev for dev in snapshot.devices if dev.mac.lower() == mac.lower()), None)
+        target = next(
+            (dev for dev in snapshot.devices if dev.mac.lower() == mac.lower()), None
+        )
         if target is None:
             raise WirelessError(f"Device with MAC {mac} not found")
+        self.set_pwm_direct(
+            target, pwm_values, sequence_index=sequence_index, label=mac
+        )
+
+    def set_pwm_direct(
+        self,
+        target: WirelessDeviceInfo,
+        pwm_values: Sequence[int],
+        *,
+        sequence_index: int = 1,
+        label: Optional[str] = None,
+    ) -> None:
+        self._send_pwm_command(
+            target, pwm_values, sequence_index=sequence_index, label=label
+        )
+
+    def _send_pwm_command(
+        self,
+        target: WirelessDeviceInfo,
+        pwm_values: Sequence[int],
+        *,
+        sequence_index: int,
+        label: Optional[str],
+    ) -> None:
         if not target.is_bound:
-            raise WirelessError("Device is not bound to a master controller; cannot send PWM")
+            raise WirelessError(
+                "Device is not bound to a master controller; cannot send PWM"
+            )
         payload = bytearray(RF_PAYLOAD_SIZE)
         payload[0] = 0x12
         payload[1] = 0x10
@@ -119,13 +154,222 @@ class WirelessTransceiver:
         payload[17:21] = bytes(pwm_tuple)
         logger.info(
             "Sending PWM command to %s (channel=%s rx=%s): %s seq=%d",
-            mac,
+            label or target.mac,
             target.channel,
             target.rx_type,
             pwm_tuple,
             sequence_index,
         )
         self._send_rf_data(target.channel, target.rx_type, payload)
+
+    def set_led_static(
+        self,
+        mac: str,
+        color: Optional[Tuple[int, int, int]],
+        *,
+        color_list: Optional[Sequence[Tuple[int, int, int]]] = None,
+        broadcast: bool = False,
+        dict_size: int = 4096,
+    ) -> None:
+        snapshot = self.list_devices()
+        target = next(
+            (dev for dev in snapshot.devices if dev.mac.lower() == mac.lower()), None
+        )
+        if target is None:
+            raise WirelessError(f"Device with MAC {mac} not found")
+        if not target.is_bound:
+            raise WirelessError(
+                "Device is not bound to a master controller; cannot send LED data"
+            )
+        led_count = _infer_led_count(target)
+        if led_count <= 0:
+            raise WirelessError("Unable to infer LED count for target device")
+        if color_list:
+            rgb = _expand_colors(color_list, led_count, target.fan_count)
+        else:
+            if color is None:
+                raise WirelessError(
+                    "Color must be provided when color_list is not supplied"
+                )
+            rgb = _expand_colors([color], led_count, target.fan_count)
+        self._transmit_led_effect(
+            target,
+            snapshot,
+            rgb,
+            led_count=led_count,
+            total_frames=1,
+            dict_size=dict_size,
+            broadcast=broadcast,
+            interval_ms=None,
+        )
+
+    def set_led_rainbow(
+        self,
+        mac: str,
+        *,
+        frames: int = 24,
+        interval_ms: int = 50,
+        broadcast: bool = False,
+        dict_size: int = 4096,
+    ) -> None:
+        snapshot = self.list_devices()
+        target = next(
+            (dev for dev in snapshot.devices if dev.mac.lower() == mac.lower()), None
+        )
+        if target is None:
+            raise WirelessError(f"Device with MAC {mac} not found")
+        if not target.is_bound:
+            raise WirelessError(
+                "Device is not bound to a master controller; cannot send LED data"
+            )
+        led_count = _infer_led_count(target)
+        if led_count <= 0:
+            raise WirelessError("Unable to infer LED count for target device")
+        data = tinyuz.generate_rainbow_frames(led_count, frame_count=frames)
+        self._transmit_led_effect(
+            target,
+            snapshot,
+            data,
+            led_count=led_count,
+            total_frames=frames,
+            dict_size=dict_size,
+            broadcast=broadcast,
+            interval_ms=interval_ms,
+        )
+
+    def set_led_frames(
+        self,
+        mac: str,
+        frames: Sequence[Sequence[Tuple[int, int, int]]],
+        *,
+        interval_ms: int = 50,
+        broadcast: bool = False,
+        dict_size: int = 4096,
+    ) -> None:
+        if not frames:
+            raise WirelessError("Frames sequence cannot be empty")
+        snapshot = self.list_devices()
+        target = next(
+            (dev for dev in snapshot.devices if dev.mac.lower() == mac.lower()), None
+        )
+        if target is None:
+            raise WirelessError(f"Device with MAC {mac} not found")
+        if not target.is_bound:
+            raise WirelessError(
+                "Device is not bound to a master controller; cannot send LED data"
+            )
+        led_count = _infer_led_count(target)
+        if led_count <= 0:
+            raise WirelessError("Unable to infer LED count for target device")
+        buffer = bytearray()
+        for frame in frames:
+            frame_bytes = _expand_colors(frame, led_count, target.fan_count)
+            buffer.extend(frame_bytes)
+        self._transmit_led_effect(
+            target,
+            snapshot,
+            bytes(buffer),
+            led_count=led_count,
+            total_frames=len(frames),
+            dict_size=dict_size,
+            broadcast=broadcast,
+            interval_ms=interval_ms,
+        )
+
+    def _transmit_led_effect(
+        self,
+        target: WirelessDeviceInfo,
+        snapshot: WirelessSnapshot,
+        raw_rgb: bytes,
+        *,
+        led_count: int,
+        total_frames: int,
+        dict_size: int,
+        broadcast: bool,
+        interval_ms: Optional[int],
+    ) -> None:
+        if led_count <= 0:
+            raise WirelessError("LED count must be positive")
+        if total_frames <= 0:
+            raise WirelessError("Frame count must be positive")
+        expected_len = led_count * total_frames * 3
+        if len(raw_rgb) != expected_len:
+            raise WirelessError(
+                f"LED data length mismatch (expected {expected_len} bytes, got {len(raw_rgb)})",
+            )
+
+        if FIRST_LED_PACKET_DATA_MAX <= 0:
+            raise WirelessError(
+                "Invalid LED packet configuration (no space for payload data)"
+            )
+
+        compressed = tinyuz.compress_led_payload(raw_rgb, dict_size=dict_size)
+        compressed_len = len(compressed)
+        first_chunk_len = min(compressed_len, FIRST_LED_PACKET_DATA_MAX)
+        remaining = compressed_len - first_chunk_len
+        extra_packets = math.ceil(remaining / LED_DATA_CHUNK) if remaining > 0 else 0
+        total_packets = 1 + extra_packets
+        if total_packets > 255:
+            raise WirelessError("LED payload is too large to transmit")
+
+        mac_bytes = b"\xff" * 6 if broadcast else _mac_to_bytes(target.mac)
+        master_mac = _mac_to_bytes(target.master_mac)
+        effect_index = _generate_effect_index()
+        channel = target.channel if target.channel else snapshot.devices[0].channel
+
+        logger.info(
+            "Transmitting LED effect to %s (leds=%d frames=%d packets=%d)",
+            target.mac,
+            led_count,
+            total_frames,
+            total_packets,
+        )
+
+        data_offset = 0
+        for packet_index in range(total_packets):
+            payload = bytearray(RF_PAYLOAD_SIZE)
+            payload[0] = 0x12
+            payload[1] = 0x20
+            payload[2:8] = mac_bytes
+            payload[8:14] = master_mac
+            payload[14:18] = effect_index
+            payload[18] = packet_index & 0xFF
+            payload[19] = total_packets & 0xFF
+
+            if packet_index == 0:
+                data_len = len(compressed)
+                payload[20] = (data_len >> 24) & 0xFF
+                payload[21] = (data_len >> 16) & 0xFF
+                payload[22] = (data_len >> 8) & 0xFF
+                payload[23] = data_len & 0xFF
+                payload[24] = 0
+                payload[25] = (total_frames >> 8) & 0xFF
+                payload[26] = total_frames & 0xFF
+                payload[27] = led_count & 0xFF
+                if interval_ms is not None:
+                    payload[32] = (interval_ms >> 8) & 0xFF
+                    payload[33] = interval_ms & 0xFF
+
+                chunk_len = first_chunk_len
+                if chunk_len:
+                    chunk = compressed[data_offset : data_offset + chunk_len]
+                    payload[
+                        FIRST_LED_PACKET_DATA_OFFSET : FIRST_LED_PACKET_DATA_OFFSET
+                        + chunk_len
+                    ] = chunk
+                    data_offset += chunk_len
+            else:
+                chunk_len = min(LED_DATA_CHUNK, compressed_len - data_offset)
+                if chunk_len:
+                    chunk = compressed[data_offset : data_offset + chunk_len]
+                    payload[20 : 20 + chunk_len] = chunk
+                    data_offset += chunk_len
+
+            self._send_rf_data(channel, target.rx_type, payload)
+            if packet_index == 0:
+                for _ in range(3):
+                    time.sleep(0.02)
+                    self._send_rf_data(channel, target.rx_type, payload)
 
     def bind_device(
         self,
@@ -135,7 +379,9 @@ class WirelessTransceiver:
         rx_type: Optional[int] = None,
     ) -> WirelessDeviceInfo:
         snapshot = self.list_devices()
-        target = next((dev for dev in snapshot.devices if dev.mac.lower() == mac.lower()), None)
+        target = next(
+            (dev for dev in snapshot.devices if dev.mac.lower() == mac.lower()), None
+        )
         if target is None:
             raise WirelessError(f"Device with MAC {mac} not found")
         if target.is_bound:
@@ -152,7 +398,11 @@ class WirelessTransceiver:
                 )
 
         if rx_type is None:
-            used = {dev.rx_type for dev in snapshot.devices if dev.is_bound and dev.rx_type > 0}
+            used = {
+                dev.rx_type
+                for dev in snapshot.devices
+                if dev.is_bound and dev.rx_type > 0
+            }
             for candidate in range(1, 16):
                 if candidate not in used:
                     rx_type = candidate
@@ -177,7 +427,9 @@ class WirelessTransceiver:
         self._send_rf_data(channel, target.rx_type or 0, payload)
         time.sleep(0.1)
         refreshed = self.list_devices()
-        updated = next((dev for dev in refreshed.devices if dev.mac.lower() == mac.lower()), None)
+        updated = next(
+            (dev for dev in refreshed.devices if dev.mac.lower() == mac.lower()), None
+        )
         logger.info(
             "Bind request sent for %s (channel=%s rx_type=%s master=%s)",
             mac,
@@ -189,7 +441,9 @@ class WirelessTransceiver:
 
     def unbind_device(self, mac: str) -> WirelessDeviceInfo:
         snapshot = self.list_devices()
-        target = next((dev for dev in snapshot.devices if dev.mac.lower() == mac.lower()), None)
+        target = next(
+            (dev for dev in snapshot.devices if dev.mac.lower() == mac.lower()), None
+        )
         if target is None:
             raise WirelessError(f"Device with MAC {mac} not found")
         if not target.is_bound:
@@ -210,13 +464,17 @@ class WirelessTransceiver:
         self._send_rf_data(channel, target.rx_type, payload)
         time.sleep(0.1)
         refreshed = self.list_devices()
-        updated = next((dev for dev in refreshed.devices if dev.mac.lower() == mac.lower()), None)
+        updated = next(
+            (dev for dev in refreshed.devices if dev.mac.lower() == mac.lower()), None
+        )
         logger.info("Unbind request sent for %s", mac)
         return updated or target
 
     def set_pwm_sync(self, mac: str, enable: bool, fallback_pwm: int = 100) -> None:
         snapshot = self.list_devices()
-        target = next((dev for dev in snapshot.devices if dev.mac.lower() == mac.lower()), None)
+        target = next(
+            (dev for dev in snapshot.devices if dev.mac.lower() == mac.lower()), None
+        )
         if target is None:
             raise WirelessError(f"Device with MAC {mac} not found")
         if not target.is_bound:
@@ -282,8 +540,7 @@ class WirelessTransceiver:
             fan_num = record[19] if record[19] < 10 else record[19] - 10
             fan_pwm = tuple(record[36:40])
             fan_rpm = tuple(
-                (record[28 + i * 2] << 8) | record[29 + i * 2]
-                for i in range(4)
+                (record[28 + i * 2] << 8) | record[29 + i * 2] for i in range(4)
             )
             cmd_seq = record[40]
             devices.append(
@@ -294,8 +551,8 @@ class WirelessTransceiver:
                     rx_type=rx_type,
                     device_type=dev_type,
                     fan_count=fan_num,
-                    pwm_values=fan_pwm,
-                    fan_rpm=fan_rpm,
+                    pwm_values=cast(Tuple[int, int, int, int], fan_pwm),
+                    fan_rpm=cast(Tuple[int, int, int, int], fan_rpm),
                     command_sequence=cmd_seq,
                     raw=record,
                 ),
@@ -324,31 +581,127 @@ class WirelessTransceiver:
             time.sleep(0.002)
 
 
-def run_pwm_sync_loop(mac_addrs, *, enable: bool, fallback_pwm: int) -> None:
+def run_pwm_sync_loop(
+    mac_addrs,
+    *,
+    interval: float = 1.0,
+    max_cycles: Optional[int] = None,
+    stop_after_first_send: bool = False,
+) -> None:
     macs = [m.lower() for m in mac_addrs]
+    if not macs:
+        logger.info("No targets provided to PWM sync loop; nothing to do")
+        return
+    interval = max(interval, 0.1)
     logger.info(
-        "Starting PWM sync loop for %d device(s) (%s)",
+        "Starting motherboard PWM sync loop for %d device(s) (interval=%.2fs)",
         len(macs),
-        "enable" if enable else f"disable fallback={fallback_pwm}",
+        interval,
     )
+    last_sent: Dict[str, int] = {}
+    current_pwm: Optional[int] = None
+    missing_logged = False
+    cycles = 0
+    any_sent = False
     try:
         while True:
-            with WirelessTransceiver() as tx:
-                snapshot = tx.list_devices()
-                targets = [dev for dev in snapshot.devices if dev.mac.lower() in macs]
-                if not targets:
-                    logger.debug("PWM sync loop found no targets; sleeping")
-                    time.sleep(1)
-                    continue
-                for dev in targets:
-                    if enable:
-                        tx.set_pwm_sync(dev.mac, enable=True)
+            try:
+                with WirelessTransceiver() as tx:
+                    snapshot = tx.list_devices()
+                    pwm = snapshot.motherboard_pwm()
+                    pwm_values: Optional[List[int]] = None
+                    if pwm is None:
+                        if current_pwm is None:
+                            if not missing_logged:
+                                logger.debug(
+                                    "No motherboard PWM value detected; nothing to sync this cycle"
+                                )
+                                missing_logged = True
+                        else:
+                            pwm = current_pwm
+                            pwm_values = [pwm] * 4
+                            if not missing_logged:
+                                logger.debug(
+                                    "No new motherboard PWM value detected; reusing previous value %d",
+                                    pwm,
+                                )
+                                missing_logged = True
                     else:
-                        tx.set_pwm_sync(dev.mac, enable=False, fallback_pwm=fallback_pwm)
-                time.sleep(1)
+                        logger.debug(
+                            "Extracted motherboard PWM raw=%s computed=%d",
+                            _format_pwm_debug(snapshot.raw),
+                            pwm,
+                        )
+                        current_pwm = pwm
+                        pwm_values = [pwm] * 4
+                        missing_logged = False
+                    if pwm_values is not None:
+                        pwm_int = pwm if pwm is not None else current_pwm
+                        if pwm_int is None:
+                            continue
+                        available = {
+                            dev.mac.lower(): dev
+                            for dev in snapshot.devices
+                            if dev.is_bound
+                        }
+                        for mac in macs:
+                            target = available.get(mac)
+                            if target is None:
+                                logger.debug(
+                                    "Target %s not bound or missing from snapshot", mac
+                                )
+                                continue
+                            if last_sent.get(mac) == pwm_int:
+                                continue
+                            sequence_index = (target.command_sequence + 1) & 0xFF
+                            try:
+                                tx.set_pwm_direct(
+                                    target,
+                                    pwm_values,
+                                    sequence_index=sequence_index,
+                                )
+                            except WirelessError as exc:
+                                logger.warning(
+                                    "Failed to send PWM to %s: %s", target.mac, exc
+                                )
+                                continue
+                            last_sent[mac] = pwm_int
+                            any_sent = True
+                cycles += 1
+            except WirelessError as exc:
+                logger.warning("PWM sync iteration failed: %s", exc)
+            if stop_after_first_send and any_sent:
+                break
+            if max_cycles is not None and cycles >= max_cycles:
+                break
+            time.sleep(interval)
     except KeyboardInterrupt:
         logger.info("PWM sync loop interrupted by user")
         return
+
+
+def _extract_motherboard_pwm(raw: bytes) -> Optional[int]:
+    if not raw or len(raw) < 4:
+        return None
+    indicator = raw[2]
+    value = raw[3]
+    if indicator >> 7:
+        return None
+    denominator = (indicator & 0x7F) + value
+    if denominator == 0:
+        return None
+    pwm = int(255.0 * (value / denominator))
+    if pwm < 0:
+        return 0
+    if pwm > 255:
+        return 255
+    return pwm
+
+
+def _format_pwm_debug(raw: bytes) -> str:
+    if len(raw) < 4:
+        return "N/A"
+    return f"{raw[2]:02x}:{raw[3]:02x}"
 
 
 def _bytes_to_mac(raw: bytes) -> str:
@@ -360,3 +713,88 @@ def _mac_to_bytes(mac: str) -> bytes:
     if len(parts) != 6:
         raise WirelessError(f"Invalid MAC address '{mac}'")
     return bytes(int(part, 16) for part in parts)
+
+
+def _generate_effect_index() -> bytes:
+    value = int(time.time() * 1000) & 0xFFFFFFFF
+    return bytes(
+        (
+            (value >> 24) & 0xFF,
+            (value >> 16) & 0xFF,
+            (value >> 8) & 0xFF,
+            value & 0xFF,
+        ),
+    )
+
+
+def _infer_led_count(device: WirelessDeviceInfo) -> int:
+    mapping = {
+        1: 116,
+        2: 132,
+        3: 174,
+        4: 88,
+        65: 96,
+    }
+    if device.device_type in mapping:
+        led_count = mapping[device.device_type]
+    elif device.device_type == 10:
+        led_count = 24 + max(device.fan_count, 0) * 24
+    elif device.fan_count > 0:
+        led_count = device.fan_count * 26
+    else:
+        led_count = 60
+
+    hint = _extract_led_count_hint(device.raw)
+    if hint and hint != led_count:
+        if led_count == 60 or device.fan_count == 0:
+            logger.debug(
+                "Adopting LED count hint %s for device %s (prev=%s)",
+                hint,
+                device.mac,
+                led_count,
+            )
+            led_count = hint
+        else:
+            logger.debug(
+                "LED count hint %s for device %s differs from heuristic %s",
+                hint,
+                device.mac,
+                led_count,
+            )
+
+    return led_count
+
+
+def _expand_colors(
+    colors: Sequence[Tuple[int, int, int]],
+    led_count: int,
+    fan_count: int,
+) -> bytes:
+    if not colors:
+        raise WirelessError("Color list cannot be empty")
+
+    def to_bytes(color: Tuple[int, int, int]) -> bytes:
+        for component in color:
+            if not 0 <= component <= 255:
+                raise WirelessError("Color values must be between 0 and 255")
+        return bytes(color)
+
+    if len(colors) == led_count:
+        return b"".join(to_bytes(color) for color in colors)
+    if len(colors) == 1:
+        return to_bytes(colors[0]) * led_count
+    if fan_count > 0 and led_count % fan_count == 0 and len(colors) == fan_count:
+        leds_per_fan = led_count // fan_count
+        return b"".join(to_bytes(color) * leds_per_fan for color in colors)
+    raise WirelessError(
+        "Color list length must match LED count or fan count (with evenly divisible LEDs).",
+    )
+
+
+def _extract_led_count_hint(raw: bytes) -> Optional[int]:
+    if not raw or len(raw) < 32:
+        return None
+    hint = raw[31]
+    if hint == 0:
+        return None
+    return hint

@@ -56,7 +56,9 @@ class USBEndpointDevice:
         self._serial_number = serial_number
         self._location_id = location_id
         self._device = self._open_device(configuration)
-        self._interface, self._endpoints = self._claim_interface(interface, write_endpoint, read_endpoint)
+        self._interface, self._endpoints = self._claim_interface(
+            interface, write_endpoint, read_endpoint
+        )
 
     @property
     def device(self) -> usb.core.Device:
@@ -104,7 +106,11 @@ class USBEndpointDevice:
                 return False
         if self._serial_number is not None:
             try:
-                serial = usb.util.get_string(dev, dev.iSerialNumber) if dev.iSerialNumber else None
+                serial = (
+                    usb.util.get_string(dev, dev.iSerialNumber)
+                    if dev.iSerialNumber
+                    else None
+                )
             except usb.core.USBError:
                 serial = None
             if serial != self._serial_number:
@@ -136,7 +142,9 @@ class USBEndpointDevice:
             for attempt in range(5):
                 try:
                     usb.util.claim_interface(self._device, intf_num)
-                except usb.core.USBError as exc:  # pragma: no branch - error handling path
+                except (
+                    usb.core.USBError
+                ) as exc:  # pragma: no branch - error handling path
                     last_error = exc
                     if not _is_resource_busy_error(exc) or attempt == 4:
                         if _is_resource_busy_error(exc):
@@ -165,13 +173,17 @@ class USBEndpointDevice:
             if ep_out is None and write_ep is None:
                 ep_out = usb.util.find_descriptor(
                     intf,
-                    custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress)
+                    custom_match=lambda e: usb.util.endpoint_direction(
+                        e.bEndpointAddress
+                    )
                     == usb.util.ENDPOINT_OUT,
                 )
             if ep_in is None and read_ep is None:
                 ep_in = usb.util.find_descriptor(
                     intf,
-                    custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress)
+                    custom_match=lambda e: usb.util.endpoint_direction(
+                        e.bEndpointAddress
+                    )
                     == usb.util.ENDPOINT_IN,
                 )
             if ep_out is not None and ep_in is not None:

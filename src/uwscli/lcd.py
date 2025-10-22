@@ -7,24 +7,33 @@ import dataclasses
 import datetime
 import enum
 import time
-from typing import Dict, Iterator, List, Optional
-
-import hid
-
-try:  # Prefer the namespace-safe module
-    from Cryptodome.Cipher import DES  # type: ignore[import]
-    from Cryptodome.Util import Padding  # type: ignore[import]
-except ImportError:  # pragma: no cover - fallback for alternative install
-    try:
-        from Crypto.Cipher import DES  # type: ignore[import]
-        from Crypto.Util import Padding  # type: ignore[import]
-    except ImportError:  # pragma: no cover - handled at runtime
-        DES = None  # type: ignore[assignment]
-        Padding = None  # type: ignore[assignment]
+from typing import Any, Dict, Iterator, List, Optional
 
 from .structs import LCDControlMode, LCDControlSetting, ScreenRotation
 from .system_usb import find_devices_by_vid_pid
 from .usbutil import USBEndpointDevice, USBError
+
+import hid
+
+DES: Any
+Padding: Any
+
+try:  # Prefer the namespace-safe module
+    from Cryptodome.Cipher import DES as _CryptodomeDES
+    from Cryptodome.Util import Padding as _CryptodomePadding
+
+    DES = _CryptodomeDES
+    Padding = _CryptodomePadding
+except ImportError:  # pragma: no cover - fallback for alternative install
+    try:
+        from Crypto.Cipher import DES as _CryptoDES
+        from Crypto.Util import Padding as _CryptoPadding
+
+        DES = _CryptoDES
+        Padding = _CryptoPadding
+    except ImportError:  # pragma: no cover - handled at runtime
+        DES = None
+        Padding = None
 
 
 LCD_REPORT_ID = 0x02
@@ -150,7 +159,9 @@ class WirelessUSBTransport:
             serial_number=serial_number,
             location_id=location_id,
         )
-        utc_midnight = datetime.datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        utc_midnight = datetime.datetime.utcnow().replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
         self._epoch = utc_midnight - datetime.timedelta(days=1)
         self._last_handshake = 0.0
 
@@ -221,14 +232,18 @@ class WirelessUSBTransport:
         self.send_jpg(payload)
 
     def send_boot_video(self, payload: bytes) -> None:
-        raise LCDDeviceError("Boot video upload is not supported for wireless LCD devices")
+        raise LCDDeviceError(
+            "Boot video upload is not supported for wireless LCD devices"
+        )
 
     def send_avi(self, payload: bytes) -> None:
         raise LCDDeviceError("AVI streaming is not supported for wireless LCD devices")
 
     def reboot(self) -> None:
         self._ensure_awake()
-        self._send_command(WirelessCommand.REBOOT, expect_reply=False, drain_response=True)
+        self._send_command(
+            WirelessCommand.REBOOT, expect_reply=False, drain_response=True
+        )
 
     def _timestamp_ms(self) -> int:
         delta = datetime.datetime.utcnow() - self._epoch
@@ -246,7 +261,9 @@ class WirelessUSBTransport:
         packet = self._build_packet(command, payload=payload, single_byte=single_byte)
         written = self._write_with_recovery(packet)
         if written != len(packet):
-            raise LCDDeviceError(f"Incomplete wireless USB write ({written}/{len(packet)})")
+            raise LCDDeviceError(
+                f"Incomplete wireless USB write ({written}/{len(packet)})"
+            )
         if expect_reply:
             return self._device.read(self._HEADER_SIZE)
         if drain_response:
@@ -344,6 +361,7 @@ class WirelessUSBTransport:
         except USBError:
             return b""
 
+
 class TLLCDDevice:
     """Control a TL LCD panel resolved by its USB serial number."""
 
@@ -360,7 +378,9 @@ class TLLCDDevice:
         if not normalized:
             raise LCDDeviceError("Serial selector cannot be empty")
 
-        matches = [dev for dev in enumerate_devices() if dev.serial_number == normalized]
+        matches = [
+            dev for dev in enumerate_devices() if dev.serial_number == normalized
+        ]
         if not matches:
             raise LCDDeviceError(f"No LCD device found with serial {normalized}")
         if len(matches) > 1:
@@ -453,7 +473,11 @@ class TLLCDDevice:
         responses: List[bytes] = []
         packets = list(self._build_packets(command, data))
         if not packets:
-            packets = [bytes(bytearray([LCD_REPORT_ID, command] + [0] * (OUTPUT_PACKET_SIZE - 2)))]
+            packets = [
+                bytes(
+                    bytearray([LCD_REPORT_ID, command] + [0] * (OUTPUT_PACKET_SIZE - 2))
+                )
+            ]
         for packet in packets:
             written = self._write_packet(packet)
             if written != len(packet):
@@ -480,7 +504,9 @@ class TLLCDDevice:
             except USBError as exc:
                 raise LCDDeviceError(f"USB write failed: {exc}") from exc
         if self._backend == "wireless":
-            raise LCDDeviceError("Wireless LCD backend does not support HID packet writes")
+            raise LCDDeviceError(
+                "Wireless LCD backend does not support HID packet writes"
+            )
         raise LCDDeviceError("LCD device is not open")
 
     def _read_packet(self) -> bytes:
@@ -492,7 +518,9 @@ class TLLCDDevice:
             except USBError as exc:
                 raise LCDDeviceError(f"USB read failed: {exc}") from exc
         if self._backend == "wireless":
-            raise LCDDeviceError("Wireless LCD backend does not support HID packet reads")
+            raise LCDDeviceError(
+                "Wireless LCD backend does not support HID packet reads"
+            )
         raise LCDDeviceError("LCD device is not open")
 
     def handshake(self) -> Dict[str, int]:
@@ -518,8 +546,16 @@ class TLLCDDevice:
         responses = self._write(0x3D, b"", expect_reply=True)
         if len(responses) < 2:
             raise LCDDeviceError("Firmware request did not return two packets")
-        version = _extract_payload(responses[0]).split(b"\x00", 1)[0].decode("ascii", errors="ignore")
-        build_date = _extract_payload(responses[1]).split(b"\x00", 1)[0].decode("ascii", errors="ignore")
+        version = (
+            _extract_payload(responses[0])
+            .split(b"\x00", 1)[0]
+            .decode("ascii", errors="ignore")
+        )
+        build_date = (
+            _extract_payload(responses[1])
+            .split(b"\x00", 1)[0]
+            .decode("ascii", errors="ignore")
+        )
         return {"version": version, "build": build_date}
 
     def control(self, setting: LCDControlSetting) -> None:

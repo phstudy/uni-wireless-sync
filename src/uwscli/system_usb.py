@@ -8,7 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
@@ -24,7 +24,9 @@ class USBRecord:
 _VENDOR_RE = re.compile(r'"idVendor"\s*=\s*(\d+)')
 _PRODUCT_RE = re.compile(r'"idProduct"\s*=\s*(\d+)')
 _LOCATION_RE = re.compile(r'"locationID"\s*=\s*(\d+)')
-_STRING_RE = re.compile(r'"(kUSBProductString|USB Product Name|kUSBVendorString|USB Vendor Name|USB Serial Number|kUSBSerialNumberString)"\s*=\s*"([^"]*)"')
+_STRING_RE = re.compile(
+    r'"(kUSBProductString|USB Product Name|kUSBVendorString|USB Vendor Name|USB Serial Number|kUSBSerialNumberString)"\s*=\s*"([^"]*)"'
+)
 
 
 def _read_text(path: Path) -> Optional[str]:
@@ -48,7 +50,7 @@ def _parse_int(value: Optional[str], base: int = 10) -> Optional[int]:
 
 def _parse_ioreg(text: str) -> List[USBRecord]:
     devices: List[USBRecord] = []
-    current: Dict[str, Optional[str] | int] | None = None
+    current: Dict[str, Any] | None = None
 
     def flush() -> None:
         nonlocal current
@@ -57,14 +59,18 @@ def _parse_ioreg(text: str) -> List[USBRecord]:
         vid = current.get("vendor_id")
         pid = current.get("product_id")
         if isinstance(vid, int) and isinstance(pid, int):
+            product = current.get("product")
+            vendor = current.get("vendor")
+            serial = current.get("serial")
+            location_raw = current.get("location_id")
             devices.append(
                 USBRecord(
                     vendor_id=vid,
                     product_id=pid,
-                    product=current.get("product"),
-                    vendor=current.get("vendor"),
-                    serial=current.get("serial"),
-                    location_id=current.get("location_id") if isinstance(current.get("location_id"), int) else None,
+                    product=product if isinstance(product, str) else None,
+                    vendor=vendor if isinstance(vendor, str) else None,
+                    serial=serial if isinstance(serial, str) else None,
+                    location_id=location_raw if isinstance(location_raw, int) else None,
                 ),
             )
         current = None
@@ -157,4 +163,8 @@ def scan_usb_devices() -> List[USBRecord]:
 
 
 def find_devices_by_vid_pid(vendor_id: int, product_id: int) -> List[USBRecord]:
-    return [rec for rec in scan_usb_devices() if rec.vendor_id == vendor_id and rec.product_id == product_id]
+    return [
+        rec
+        for rec in scan_usb_devices()
+        if rec.vendor_id == vendor_id and rec.product_id == product_id
+    ]

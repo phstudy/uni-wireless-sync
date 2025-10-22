@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Iterable, Tuple
+from typing import Iterable, Tuple, cast
 
 
 class LCDControlMode(Enum):
@@ -105,4 +105,4 @@ def clamp_pwm_values(values: Iterable[int]) -> Tuple[int, int, int, int]:
         result.append(int(value))
     while len(result) < 4:
         result.append(result[-1] if result else 0)
-    return tuple(result[:4])
+    return cast(Tuple[int, int, int, int], tuple(result[:4]))

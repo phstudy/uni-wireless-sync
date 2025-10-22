@@ -1,15 +1,16 @@
 import sys
 import types
+from typing import Any, cast
 
 
 def _ensure_usb() -> None:
     try:
-        import usb.core  # type: ignore  # noqa: F401
-        import usb.util  # type: ignore  # noqa: F401
+        import usb.core  # noqa: F401
+        import usb.util  # noqa: F401
     except ModuleNotFoundError:
-        usb_module = types.ModuleType("usb")
-        core_module = types.ModuleType("usb.core")
-        util_module = types.ModuleType("usb.util")
+        usb_module = cast(Any, types.ModuleType("usb"))
+        core_module = cast(Any, types.ModuleType("usb.core"))
+        util_module = cast(Any, types.ModuleType("usb.util"))
 
         class USBError(Exception):
             def __init__(self, *args, errno: int | None = None, **kwargs):
@@ -49,9 +50,9 @@ def _ensure_usb() -> None:
 
 def _ensure_hid() -> None:
     try:
-        import hid  # type: ignore  # noqa: F401
+        import hid  # noqa: F401
     except ModuleNotFoundError:
-        hid_module = types.ModuleType("hid")
+        hid_module = cast(Any, types.ModuleType("hid"))
 
         class _Device:
             def __init__(self, *args, **kwargs):
@@ -73,10 +74,10 @@ def _ensure_hid() -> None:
 
 def _ensure_crypto() -> None:
     try:
-        from Crypto.Cipher import DES  # type: ignore  # noqa: F401
+        from Crypto.Cipher import DES  # noqa: F401
     except ModuleNotFoundError:
-        crypto_module = types.ModuleType("Crypto")
-        cipher_module = types.ModuleType("Crypto.Cipher")
+        crypto_module = cast(Any, types.ModuleType("Crypto"))
+        cipher_module = cast(Any, types.ModuleType("Crypto.Cipher"))
 
         class _DummyCipher:
             def encrypt(self, data: bytes) -> bytes:
@@ -89,7 +90,7 @@ def _ensure_crypto() -> None:
             MODE_CBC = 1
 
             @staticmethod
-            def new(key: bytes, mode: int, iv: bytes) -> _DummyCipher:  # type: ignore[name-defined]
+            def new(key: bytes, mode: int, iv: bytes) -> _DummyCipher:
                 return _DummyCipher()
 
         cipher_module.DES = _DES
