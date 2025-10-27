@@ -38,8 +38,8 @@ dev = [
 images = ["Pillow>=10.0"]
 
 [project.urls]
-Homepage = "https://github.com/phstudy/tlv2-lcd"
-Issues = "https://github.com/phstudy/tlv2-lcd/issues"
+Homepage = "https://github.com/phstudy/uni-wireless-sync"
+Issues = "https://github.com/phstudy/uni-wireless-sync/issues"
 
 [project.scripts]
 uws = "uwscli.cli:main"
