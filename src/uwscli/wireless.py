@@ -104,6 +104,31 @@ class WirelessTransceiver:
         logger.debug("Discovered %d wireless device(s)", len(devices))
         return WirelessSnapshot(devices=devices, raw=payload)
 
+    def query_master_mac(
+        self, *, channel: Optional[int] = None
+    ) -> Optional[Tuple[str, Optional[int]]]:
+        """Query the transmitter for the currently active master MAC."""
+
+        request_channel = 8 if channel is None else channel & 0xFF
+        payload = bytearray(64)
+        payload[0] = 0x11
+        payload[1] = request_channel
+        try:
+            self._sender.write(payload)
+            response = self._sender.read(64)
+        except USBError as exc:
+            raise WirelessError(str(exc)) from exc
+        if not response or response[0] != 0x11:
+            logger.debug(
+                "Unexpected master query response header: %s",
+                response[0] if response else None,
+            )
+            return None
+        master_mac = _bytes_to_mac(response[1:7])
+        if set(master_mac.split(":")) == {"00"}:
+            return None
+        return master_mac, request_channel
+
     def set_pwm(
         self,
         mac: str,

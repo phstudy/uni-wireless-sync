@@ -42,7 +42,7 @@ INPUT_PACKET_SIZE = 64
 USB_INPUT_PACKET_SIZE = OUTPUT_PACKET_SIZE
 MAX_CHUNK = 501
 
-# Known Uni Fan LCD VID/PID combinations (original and TL V2 wireless hub)
+# Known Uni Fan LCD VID/PID combinations (original and TL V2 wireless receiver)
 KNOWN_LCD_IDS = (
     (0x04FC, 0x7393),
     (0x1CBE, 0x0006),
@@ -128,7 +128,7 @@ class WirelessCommand(enum.IntEnum):
 
 
 class WirelessUSBTransport:
-    """Implements the wireless hub WinUSB protocol used by Uni Fan LCD devices."""
+    """Implements the wireless receiver WinUSB protocol used by Uni Fan LCD devices."""
 
     _KEY = b"slv3tuzx"
     _HEADER_SIZE = 512

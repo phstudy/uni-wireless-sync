@@ -15,7 +15,7 @@ else:
     hid = _hid
 
 
-CANDIDATE_VID_PID = ((0x0416, 0x7372),)  # TL fan controller (wired hub)
+CANDIDATE_VID_PID = ((0x0416, 0x7372),)  # TL fan controller
 TL_CONTROLLER_REPORT_ID = 0x01
 LED_PACKET_HEADER_LEN = 6
 LED_PACKET_LENGTH = 64

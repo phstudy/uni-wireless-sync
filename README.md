@@ -9,7 +9,7 @@ Uni Wireless Sync (UWS) CLI provides command-line utilities for managing Uni Fan
 ## Supported Hardware
 
 - UNI FAN TL wireless LCD panels
-- UNI FAN TL wireless fan hubs (non-LCD)
+- UNI FAN TL wireless fans (non-LCD)
 
 Other Uni Fan series are currently not supported.
 
@@ -19,11 +19,23 @@ Other Uni Fan series are currently not supported.
 - Query LCD firmware and handshake data.
 - Send JPEG frames or apply control settings (mode, brightness, rotation) to the LCD.
 - Keep the wireless TL LCD awake by emitting periodic handshakes.
-- List wireless fan hubs with metadata (MAC, master MAC, channel, device type, fan speeds, PWM targets).
+- List wireless fan receivers with metadata (MAC, master MAC, channel, device type, fan speeds, PWM targets).
+- List detected master controller MAC addresses to simplify binding workflows.
 - Send one-shot PWM commands to TL wireless fans over the 2.4 GHz dongle.
-- Bind or unbind wireless hubs against the active master controller.
-- Toggle motherboard PWM sync mode for one hub or every bound hub.
-- Broadcast static RGB payloads to wireless hubs (experimental).
+- Bind or unbind wireless receivers against the active master controller.
+- Toggle motherboard PWM sync mode for one receiver or every bound receiver.
+- Broadcast static RGB payloads to wireless receivers (experimental).
+
+### Fan wiring modes
+
+- **USB + PWM header (controller mode):** leave the receiver's PWM lead unplugged; control every fan via `uws fan set-fan` (any PWM value 0-255). The reported `fan_pwm` reflects your last command.
+- **USB-only (receiver mode, PWM lead connected to motherboard):** the CLI writes a PWM of 6 (e.g. `uws fan pwm-sync --mode receiver --all`) so the receiver keeps syncing to the motherboard header. Sending another `set-fan` value at any time overrides the sync immediately; writing 6 (or re-running the sync helper) hands control back to the motherboard.
+
+## FAQ
+
+- **How do I mount the L-Wireless Controller (v1)?** The thicker dongle supports two options: (1) plug into a USB Type-A port—this wiring is equivalent to `pwm-sync` receiver mode; (2) plug the header into a 9-pin USB port on the motherboard—this matches `pwm-sync` controller mode, but 2.4 GHz signal strength drops because the dongle lives inside the chassis.
+- **How do I mount the L-Wireless Controller (v2)?** The slimmer dongle only supports option (1): plug into a USB Type-A port (`pwm-sync` receiver mode).
+- **What is the difference between L-Wireless Receiver (v1) and (v2)?** Receiver v1 exposes both USB and a 2-pin PWM lead only on the LCD bundle (USB powers the LCD, the 2-pin lead powers fans); non-LCD receiver v1 units ship with just the 2-pin power lead. Receiver v2 adds a dedicated 4-pin PWM header; plug it into the motherboard when you want it to mirror the motherboard duty cycle via `pwm-sync --mode receiver`, or leave it disconnected and the controller will keep driving fan PWM directly.
 
 ## Installation
 
@@ -51,8 +63,9 @@ uws lcd info --serial <usb-serial>
 uws lcd send-jpg --serial <usb-serial> --file assets/sample_lcd.jpg
 uws lcd keep-alive --serial <usb-serial> --interval 5
 
-# Fan hub operations
-uws fan set-fan --mac aa:bb:cc:dd:ee:ff --pwm 120
+# Fan receiver operations
+uws fan set-fan --mac aa:bb:cc:dd:ee:ff --pwm 120  # direct PWM control
+uws fan pwm-sync --mode receiver --all           # receiver mode receivers (sets PWM=6)
 uws fan bind --mac aa:bb:cc:dd:ee:ff
 uws fan unbind --mac aa:bb:cc:dd:ee:ff
 uws fan pwm-sync --all
@@ -68,8 +81,10 @@ uws fan pwm-sync --mac aa:bb:cc:dd:ee:ff --once
 - `uws lcd send-jpg --serial <usb-serial> --file <image.jpg>` – stream a JPEG asset.
 - `uws lcd keep-alive --serial <usb-serial> [--interval seconds]` – emit periodic handshakes to prevent the wireless panel from dimming.
 - `uws lcd control --serial <usb-serial> [--mode show-jpg|show-app-sync|lcd-test] [--jpg-index N] [--brightness 0-100] [--fps N] [--rotation 0|90|180|270] [--test-color R,G,B]` – send an `LCDControlSetting` payload.
-- `uws fan list` – fetch a snapshot of bound wireless devices via the RF receiver.
-- `uws fan set-fan --mac <aa:bb:..> --pwm <0-255>` – send a single shot PWM update to the matching wireless hub using the RF sender.
+- `uws fan list` – fetch a snapshot of bound wireless receivers via the RF receiver.
+- `uws fan list-masters` – enumerate master controllers and associated wireless receivers.
+- `uws fan set-fan --mac <aa:bb:..> --pwm <0-255> [--sequence-index N]` – send a single shot PWM update to one receiver; `--all` broadcasts to every bound receiver.
+- `uws fan pwm-sync --mac|--all [--mode controller|receiver] [--interval seconds] [--once] [--sequence-index N]` – synchronize receiver speeds. `controller` polls motherboard PWM and replays the value via RF (`--interval` / `--once` apply here); `receiver` sets PWM=6 so the receiver tracks the motherboard header directly (`--sequence-index` applies here).
 - `uws fan set-led --mac <aa:bb:..> --mode static|rainbow|frames|effect|random-effect` – apply wireless LED effects (**experimental**).
 
 ### `uws fan set-led` modes
@@ -93,13 +108,13 @@ uws fan pwm-sync --mac aa:bb:cc:dd:ee:ff --once
   ```
   uws fan set-led --mac aa:bb:cc:dd:ee:ff --mode random-effect --effect-brightness 200 --effect-direction 1
   ```
-- `uws fan pwm-sync --all|--mac [--once]` – mirror motherboard PWM output to bound hubs (looping by default, single iteration with `--once`).
+- `uws fan pwm-sync --all|--mac [--mode controller|receiver] [--interval seconds] [--once] [--sequence-index N]` – default `receiver` mode writes PWM=6 so fans follow the motherboard; `controller` mode polls and replays PWM from the motherboard (supports `--interval`/`--once` for polling loops; `--sequence-index` applies to receiver broadcasts).
 
 ## Dependencies
 
 - `hidapi` (via `hid`) for TL LCD HID access.
 - `pyusb` for the RF sender/receiver WinUSB endpoints.
-- `pycryptodomex` for the DES-CBC transport used by the wireless LCD hub.
+- `pycryptodomex` for the DES-CBC transport used by the wireless LCD receiver.
 - `Pillow` is optional for JPEG frame validation.
 
 Each command expects the TL LCD USB display (vendor 0x04FC or 0x1CBE) and the wireless transmitter/receiver pair (vendor 0x0416) to be attached when the command executes.

@@ -45,5 +45,57 @@ def test_pwm_sync_all_requires_bound_device(monkeypatch):
                 "pwm-sync",
                 "--all",
             ]
-        )
+    )
     assert "No bound wireless devices found" in str(exc.value)
+
+
+def test_set_fan_all_requires_bound_device(monkeypatch):
+    monkeypatch.setattr(
+        "uwscli.wireless.WirelessTransceiver",
+        lambda *args, **kwargs: _EmptySnapshotTx(),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(
+            [
+                "fan",
+                "set-fan",
+                "--all",
+                "--pwm",
+                "120",
+            ]
+    )
+    assert "No bound wireless devices found" in str(exc.value)
+
+
+def test_pwm_sync_receiver_once_invalid():
+    with pytest.raises(SystemExit) as exc:
+        cli.main(
+            [
+                "fan",
+                "pwm-sync",
+                "--mode",
+                "receiver",
+                "--mac",
+                "aa:bb:cc:dd:ee:ff",
+                "--once",
+            ]
+        )
+    assert "--once is only valid when --mode controller" in str(exc.value)
+
+
+def test_pwm_sync_receiver_interval_invalid():
+    with pytest.raises(SystemExit) as exc:
+        cli.main(
+            [
+                "fan",
+                "pwm-sync",
+                "--mode",
+                "receiver",
+                "--mac",
+                "aa:bb:cc:dd:ee:ff",
+                "--interval",
+                "0.5",
+            ]
+        )
+    assert "--interval is only valid when --mode controller" in str(exc.value)

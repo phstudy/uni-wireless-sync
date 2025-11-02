@@ -14,12 +14,15 @@ class StubTransceiver:
 
     instances: list["StubTransceiver"] = []
 
-    def __init__(self, snapshot=None):
+    def __init__(self, snapshot=None, *, master_mac=None, master_channel=8):
         self.snapshot = snapshot
         self.calls = []
         self.led_static_calls = []
         self.led_rainbow_calls = []
         self.led_effect_calls = []
+        self.pwm_calls = []
+        self.master_mac = master_mac
+        self.master_channel = master_channel
         StubTransceiver.instances.append(self)
 
     def __enter__(self):
@@ -35,6 +38,15 @@ class StubTransceiver:
                 "list_devices() was called without a prepared snapshot"
             )
         return self.snapshot
+
+    def query_master_mac(self, channel=None):
+        if self.master_mac is None:
+            return None
+        requested_channel = 8 if channel is None else channel
+        channel_to_return = (
+            self.master_channel if self.master_channel is not None else requested_channel
+        )
+        return self.master_mac, channel_to_return
 
     def set_led_static(self, mac, color, color_list=None, **kwargs):
         self.led_static_calls.append(
@@ -85,6 +97,33 @@ class StubTransceiver:
             }
         )
 
+    def set_pwm(self, mac, pwm_values, sequence_index=1):
+        self.pwm_calls.append(
+            {
+                "type": "set_pwm",
+                "mac": mac,
+                "pwm": list(pwm_values),
+                "sequence_index": sequence_index,
+            }
+        )
+
+    def set_pwm_direct(
+        self,
+        target,
+        pwm_values,
+        *,
+        sequence_index=1,
+        label=None,
+    ):
+        self.pwm_calls.append(
+            {
+                "type": "set_pwm_direct",
+                "mac": getattr(target, "mac", label),
+                "pwm": list(pwm_values),
+                "sequence_index": sequence_index,
+            }
+        )
+
 
 def test_pwm_sync_mac_json(monkeypatch, capsys):
     run_calls = []
@@ -111,6 +150,8 @@ def test_pwm_sync_mac_json(monkeypatch, capsys):
             "json",
             "fan",
             "pwm-sync",
+            "--mode",
+            "controller",
             "--mac",
             "aa:bb:cc:dd:ee:ff",
             "--interval",
@@ -124,6 +165,7 @@ def test_pwm_sync_mac_json(monkeypatch, capsys):
         "targets": ["aa:bb:cc:dd:ee:ff"],
         "interval": 0.5,
         "status": "running",
+        "mode": "controller",
     }
     assert toggles == [True]
     assert run_calls == [
@@ -161,6 +203,8 @@ def test_pwm_sync_mac_once(monkeypatch, capsys):
             "json",
             "fan",
             "pwm-sync",
+            "--mode",
+            "controller",
             "--mac",
             "aa:bb:cc:dd:ee:ff",
             "--once",
@@ -173,6 +217,7 @@ def test_pwm_sync_mac_once(monkeypatch, capsys):
         "targets": ["aa:bb:cc:dd:ee:ff"],
         "interval": 1.0,
         "status": "once",
+        "mode": "controller",
     }
     assert toggles == [True]
     assert run_calls == [
@@ -216,7 +261,11 @@ def test_pwm_sync_all_cli(monkeypatch, capsys):
     )
 
     def factory(*args, **kwargs):
-        return StubTransceiver(snapshot=snapshot)
+        return StubTransceiver(
+            snapshot=snapshot,
+            master_mac="11:22:33:44:55:66",
+            master_channel=8,
+        )
 
     run_calls = []
 
@@ -241,6 +290,8 @@ def test_pwm_sync_all_cli(monkeypatch, capsys):
         [
             "fan",
             "pwm-sync",
+            "--mode",
+            "controller",
             "--all",
         ]
     )
@@ -275,7 +326,11 @@ def test_fan_list_json_output(monkeypatch, capsys):
     snapshot = wireless.WirelessSnapshot(devices=[device], raw=b"")
 
     def factory(*args, **kwargs):
-        return StubTransceiver(snapshot=snapshot)
+        return StubTransceiver(
+            snapshot=snapshot,
+            master_mac="11:22:33:44:55:66",
+            master_channel=8,
+        )
 
     monkeypatch.setattr(wireless, "WirelessTransceiver", factory)
 
@@ -286,6 +341,402 @@ def test_fan_list_json_output(monkeypatch, capsys):
     assert payload["devices"][0]["channel"] == 3
     assert payload["devices"][0]["fan_pwm"] == [10, 20, 30, 40]
     assert payload["devices"][0]["fan_rpm"] == [1000, 0, 0, 0]
+
+
+def test_fan_list_masters_json_output(monkeypatch, capsys):
+    StubTransceiver.instances.clear()
+    master = wireless.WirelessDeviceInfo(
+        mac="11:22:33:44:55:66",
+        master_mac="11:22:33:44:55:66",
+        channel=8,
+        rx_type=255,
+        device_type=255,
+        fan_count=1,
+        pwm_values=(0, 0, 0, 0),
+        fan_rpm=(0, 0, 0, 0),
+        command_sequence=1,
+        raw=bytes(42),
+    )
+    device_a = wireless.WirelessDeviceInfo(
+        mac="aa:bb:cc:dd:ee:01",
+        master_mac="11:22:33:44:55:66",
+        channel=3,
+        rx_type=1,
+        device_type=7,
+        fan_count=4,
+        pwm_values=(10, 20, 30, 40),
+        fan_rpm=(1000, 0, 0, 0),
+        command_sequence=5,
+        raw=bytes(42),
+    )
+    device_b = wireless.WirelessDeviceInfo(
+        mac="aa:bb:cc:dd:ee:02",
+        master_mac="11:22:33:44:55:66",
+        channel=4,
+        rx_type=2,
+        device_type=6,
+        fan_count=2,
+        pwm_values=(20, 20, 20, 20),
+        fan_rpm=(900, 0, 0, 0),
+        command_sequence=6,
+        raw=bytes(42),
+    )
+    snapshot = wireless.WirelessSnapshot(
+        devices=[device_b, device_a, master], raw=b""
+    )
+
+    def factory(*args, **kwargs):
+        return StubTransceiver(snapshot=snapshot)
+
+    monkeypatch.setattr(wireless, "WirelessTransceiver", factory)
+
+    cli.main(["--output", "json", "fan", "list-masters"])
+
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload == {
+        "masters": [
+            {
+                "master_mac": "11:22:33:44:55:66",
+                "channel": 8,
+                "device_count": 2,
+                "channels": [3, 4, 8],
+                "rx_types": [1, 2],
+                "devices": [
+                    {
+                        "mac": "aa:bb:cc:dd:ee:01",
+                        "channel": 3,
+                        "rx_type": 1,
+                        "device_type": 7,
+                        "fan_count": 4,
+                    },
+                    {
+                        "mac": "aa:bb:cc:dd:ee:02",
+                        "channel": 4,
+                        "rx_type": 2,
+                        "device_type": 6,
+                        "fan_count": 2,
+                    },
+                ],
+            }
+        ]
+    }
+
+
+def test_fan_list_masters_master_only_text(monkeypatch, capsys):
+    StubTransceiver.instances.clear()
+    master = wireless.WirelessDeviceInfo(
+        mac="11:22:33:44:55:66",
+        master_mac="00:00:00:00:00:00",
+        channel=8,
+        rx_type=255,
+        device_type=255,
+        fan_count=1,
+        pwm_values=(0, 0, 0, 0),
+        fan_rpm=(0, 0, 0, 0),
+        command_sequence=1,
+        raw=bytes(42),
+    )
+    snapshot = wireless.WirelessSnapshot(devices=[master], raw=b"")
+
+    def factory(*args, **kwargs):
+        return StubTransceiver(
+            snapshot=snapshot,
+            master_mac="11:22:33:44:55:66",
+            master_channel=8,
+        )
+
+    monkeypatch.setattr(wireless, "WirelessTransceiver", factory)
+
+    cli.main(["fan", "list-masters"])
+
+    out = capsys.readouterr().out.strip()
+    payload = json.loads(out)
+    assert payload == {
+        "master_mac": "11:22:33:44:55:66",
+        "channel": 8,
+        "device_count": 0,
+        "channels": [8],
+        "rx_types": [],
+        "devices": [],
+    }
+
+
+def test_fan_list_masters_query_only(monkeypatch, capsys):
+    StubTransceiver.instances.clear()
+    receiver = wireless.WirelessDeviceInfo(
+        mac="aa:bb:cc:dd:ee:ff",
+        master_mac="00:00:00:00:00:00",
+        channel=8,
+        rx_type=254,
+        device_type=0,
+        fan_count=3,
+        pwm_values=(130, 130, 130, 130),
+        fan_rpm=(1100, 0, 0, 0),
+        command_sequence=2,
+        raw=bytes(42),
+    )
+    snapshot = wireless.WirelessSnapshot(devices=[receiver], raw=b"")
+
+    def factory(*args, **kwargs):
+        return StubTransceiver(
+            snapshot=snapshot,
+            master_mac="11:22:33:44:55:66",
+            master_channel=8,
+        )
+
+    monkeypatch.setattr(wireless, "WirelessTransceiver", factory)
+
+    cli.main(["--output", "json", "fan", "list-masters"])
+
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload == {
+        "masters": [
+            {
+                "master_mac": "11:22:33:44:55:66",
+                "channel": 8,
+                "device_count": 0,
+                "channels": [8],
+                "rx_types": [],
+                "devices": [],
+            }
+        ]
+    }
+
+
+def test_fan_set_fan_all_cli(monkeypatch, capsys):
+    StubTransceiver.instances.clear()
+    device_bound_a = wireless.WirelessDeviceInfo(
+        mac="aa:bb:cc:dd:ee:01",
+        master_mac="11:22:33:44:55:66",
+        channel=3,
+        rx_type=1,
+        device_type=7,
+        fan_count=4,
+        pwm_values=(0, 0, 0, 0),
+        fan_rpm=(0, 0, 0, 0),
+        command_sequence=2,
+        raw=bytes(42),
+    )
+    device_bound_b = wireless.WirelessDeviceInfo(
+        mac="aa:bb:cc:dd:ee:02",
+        master_mac="11:22:33:44:55:66",
+        channel=4,
+        rx_type=2,
+        device_type=6,
+        fan_count=3,
+        pwm_values=(0, 0, 0, 0),
+        fan_rpm=(0, 0, 0, 0),
+        command_sequence=3,
+        raw=bytes(42),
+    )
+    device_unbound = wireless.WirelessDeviceInfo(
+        mac="de:ad:be:ef:00:01",
+        master_mac="00:00:00:00:00:00",
+        channel=5,
+        rx_type=3,
+        device_type=7,
+        fan_count=2,
+        pwm_values=(0, 0, 0, 0),
+        fan_rpm=(0, 0, 0, 0),
+        command_sequence=4,
+        raw=bytes(42),
+    )
+    snapshot = wireless.WirelessSnapshot(
+        devices=[device_unbound, device_bound_a, device_bound_b], raw=b""
+    )
+
+    def factory(*args, **kwargs):
+        return StubTransceiver(snapshot=snapshot)
+
+    monkeypatch.setattr(wireless, "WirelessTransceiver", factory)
+
+    cli.main(["fan", "set-fan", "--all", "--pwm", "150"])
+
+    out = capsys.readouterr().out.strip()
+    assert "Applied PWM [150, 150, 150, 150]" in out
+    assert "aa:bb:cc:dd:ee:01" in out
+    assert "aa:bb:cc:dd:ee:02" in out
+    stub = StubTransceiver.instances[-1]
+    macs = [call["mac"] for call in stub.pwm_calls]
+    assert macs == ["aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"]
+    for call in stub.pwm_calls:
+        assert call["pwm"] == [150, 150, 150, 150]
+        assert call["sequence_index"] == 1
+
+
+def test_fan_set_fan_sync_cli(monkeypatch, capsys):
+    StubTransceiver.instances.clear()
+    device = wireless.WirelessDeviceInfo(
+        mac="aa:bb:cc:dd:ee:ff",
+        master_mac="11:22:33:44:55:66",
+        channel=3,
+        rx_type=2,
+        device_type=7,
+        fan_count=4,
+        pwm_values=(0, 0, 0, 0),
+        fan_rpm=(0, 0, 0, 0),
+        command_sequence=1,
+        raw=bytes(42),
+    )
+    snapshot = wireless.WirelessSnapshot(devices=[device], raw=b"")
+
+    def factory(*args, **kwargs):
+        return StubTransceiver(snapshot=snapshot)
+
+    monkeypatch.setattr(wireless, "WirelessTransceiver", factory)
+
+    cli.main(["fan", "pwm-sync", "--mode", "receiver", "--mac", "aa:bb:cc:dd:ee:ff"])
+
+    out = capsys.readouterr().out.strip()
+    assert "Enabled motherboard PWM sync (receiver mode)" in out
+    stub = StubTransceiver.instances[-1]
+    assert stub.pwm_calls == [
+        {
+            "type": "set_pwm",
+            "mac": "aa:bb:cc:dd:ee:ff",
+            "pwm": [6, 6, 6, 6],
+            "sequence_index": 1,
+        }
+    ]
+
+
+def test_fan_set_fan_custom_sequence_index(monkeypatch, capsys):
+    StubTransceiver.instances.clear()
+    device = wireless.WirelessDeviceInfo(
+        mac="aa:bb:cc:dd:ee:ff",
+        master_mac="11:22:33:44:55:66",
+        channel=3,
+        rx_type=2,
+        device_type=7,
+        fan_count=4,
+        pwm_values=(0, 0, 0, 0),
+        fan_rpm=(0, 0, 0, 0),
+        command_sequence=1,
+        raw=bytes(42),
+    )
+    snapshot = wireless.WirelessSnapshot(devices=[device], raw=b"")
+
+    def factory(*args, **kwargs):
+        return StubTransceiver(snapshot=snapshot)
+
+    monkeypatch.setattr(wireless, "WirelessTransceiver", factory)
+
+    cli.main(
+        [
+            "fan",
+            "set-fan",
+            "--mac",
+            "aa:bb:cc:dd:ee:ff",
+            "--pwm",
+            "90",
+            "--sequence-index",
+            "7",
+        ]
+    )
+
+    capsys.readouterr()
+    stub = StubTransceiver.instances[-1]
+    assert stub.pwm_calls == [
+        {
+            "type": "set_pwm",
+            "mac": "aa:bb:cc:dd:ee:ff",
+            "pwm": [90, 90, 90, 90],
+            "sequence_index": 7,
+        }
+    ]
+
+
+def test_fan_set_fan_all_sync_cli(monkeypatch, capsys):
+    StubTransceiver.instances.clear()
+    device_bound_a = wireless.WirelessDeviceInfo(
+        mac="aa:bb:cc:dd:ee:01",
+        master_mac="11:22:33:44:55:66",
+        channel=3,
+        rx_type=1,
+        device_type=7,
+        fan_count=4,
+        pwm_values=(0, 0, 0, 0),
+        fan_rpm=(0, 0, 0, 0),
+        command_sequence=2,
+        raw=bytes(42),
+    )
+    device_bound_b = wireless.WirelessDeviceInfo(
+        mac="aa:bb:cc:dd:ee:02",
+        master_mac="11:22:33:44:55:66",
+        channel=4,
+        rx_type=2,
+        device_type=6,
+        fan_count=3,
+        pwm_values=(0, 0, 0, 0),
+        fan_rpm=(0, 0, 0, 0),
+        command_sequence=3,
+        raw=bytes(42),
+    )
+    snapshot = wireless.WirelessSnapshot(
+        devices=[device_bound_a, device_bound_b], raw=b""
+    )
+
+    def factory(*args, **kwargs):
+        return StubTransceiver(snapshot=snapshot)
+
+    monkeypatch.setattr(wireless, "WirelessTransceiver", factory)
+
+    cli.main(["fan", "pwm-sync", "--mode", "receiver", "--all"])
+
+    out = capsys.readouterr().out.strip()
+    assert "Enabled motherboard PWM sync (receiver mode)" in out
+    stub = StubTransceiver.instances[-1]
+    macs = [call["mac"] for call in stub.pwm_calls]
+    assert macs == ["aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"]
+    for call in stub.pwm_calls:
+        assert call["pwm"] == [6, 6, 6, 6]
+        assert call["sequence_index"] == 1
+
+
+def test_fan_pwm_sync_receiver_sequence_index(monkeypatch, capsys):
+    StubTransceiver.instances.clear()
+    device = wireless.WirelessDeviceInfo(
+        mac="aa:bb:cc:dd:ee:ff",
+        master_mac="11:22:33:44:55:66",
+        channel=3,
+        rx_type=2,
+        device_type=7,
+        fan_count=4,
+        pwm_values=(0, 0, 0, 0),
+        fan_rpm=(0, 0, 0, 0),
+        command_sequence=1,
+        raw=bytes(42),
+    )
+    snapshot = wireless.WirelessSnapshot(devices=[device], raw=b"")
+
+    def factory(*args, **kwargs):
+        return StubTransceiver(snapshot=snapshot)
+
+    monkeypatch.setattr(wireless, "WirelessTransceiver", factory)
+
+    cli.main(
+        [
+            "fan",
+            "pwm-sync",
+            "--mode",
+            "receiver",
+            "--mac",
+            "aa:bb:cc:dd:ee:ff",
+            "--sequence-index",
+            "5",
+        ]
+    )
+
+    capsys.readouterr()
+    stub = StubTransceiver.instances[-1]
+    assert stub.pwm_calls == [
+        {
+            "type": "set_pwm",
+            "mac": "aa:bb:cc:dd:ee:ff",
+            "pwm": [6, 6, 6, 6],
+            "sequence_index": 5,
+        }
+    ]
 
 
 def test_fan_set_led_cli(monkeypatch, capsys):
