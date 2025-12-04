@@ -5,12 +5,13 @@ Fetch a photo from your Immich server, resize it to 400×400, and send it straig
 ## Setup
 
 1. Generate an Immich API key with permission to view assets.
-2. (Optional) Create `~/.immich_config` containing:
+2. (Optional) Create `~/.immich_config` containing:   
    ```bash
-IMMICH_BASE_URL="https://immich.local/api"
-IMMICH_TOKEN="your-token"
-IMMICH_ASSET_ID="optional-specific-asset"
+   IMMICH_BASE_URL="https://immich.local/api"
+   IMMICH_TOKEN="your-token"
+   IMMICH_ASSET_ID="optional-specific-asset"
    ```
+
 3. Install project dependencies in editable mode:
    ```bash
    pip install -e .[dev]
