@@ -988,13 +988,13 @@ def main(argv: Iterable[str] | None = None) -> None:
         raise SystemExit("Unknown namespace")
 
 
-if __name__ == "__main__":
-    main()
-
-
 def _emit_output(args: argparse.Namespace, payload, *, text: str) -> None:
     """Emit payload according to the caller's preferred output format."""
     if args.output == "json":
         print(json.dumps(payload, ensure_ascii=False))
     else:
         print(text)
+
+
+if __name__ == "__main__":
+    main()
