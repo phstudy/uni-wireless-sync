@@ -173,18 +173,18 @@ class USBEndpointDevice:
             if ep_out is None and write_ep is None:
                 ep_out = usb.util.find_descriptor(
                     intf,
-                    custom_match=lambda e: usb.util.endpoint_direction(
-                        e.bEndpointAddress
-                    )
-                    == usb.util.ENDPOINT_OUT,
+                    custom_match=lambda e: (
+                        usb.util.endpoint_direction(e.bEndpointAddress)
+                        == usb.util.ENDPOINT_OUT
+                    ),
                 )
             if ep_in is None and read_ep is None:
                 ep_in = usb.util.find_descriptor(
                     intf,
-                    custom_match=lambda e: usb.util.endpoint_direction(
-                        e.bEndpointAddress
-                    )
-                    == usb.util.ENDPOINT_IN,
+                    custom_match=lambda e: (
+                        usb.util.endpoint_direction(e.bEndpointAddress)
+                        == usb.util.ENDPOINT_IN
+                    ),
                 )
             if ep_out is not None and ep_in is not None:
                 return intf_num, USBEndpoints(out=ep_out, inn=ep_in)

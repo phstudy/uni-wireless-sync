@@ -5,7 +5,7 @@ from typing import Any, cast
 
 def _ensure_usb() -> None:
     try:
-        import usb.core  # noqa: F401
+        import usb.core
         import usb.util  # noqa: F401
     except ModuleNotFoundError:
         usb_module = cast(Any, types.ModuleType("usb"))
@@ -17,13 +17,13 @@ def _ensure_usb() -> None:
                 super().__init__(*args)
                 self.errno = errno
 
-        def find(**kwargs):  # noqa: D401 - stub
+        def find(**kwargs):
             return None
 
-        def claim_interface(*args, **kwargs):  # noqa: D401 - stub
+        def claim_interface(*args, **kwargs):
             return None
 
-        def release_interface(*args, **kwargs):  # noqa: D401 - stub
+        def release_interface(*args, **kwargs):
             return None
 
         def endpoint_direction(address: int) -> int:
@@ -58,7 +58,7 @@ def _ensure_hid() -> None:
             def __init__(self, *args, **kwargs):
                 pass
 
-            def close(self):  # noqa: D401 - stub
+            def close(self):
                 return None
 
             def write(self, *_args, **_kwargs):

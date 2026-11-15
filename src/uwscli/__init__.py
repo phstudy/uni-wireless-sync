@@ -6,9 +6,9 @@ __all__ = [
     "cli",
     "lcd",
     "led",
-    "tinyuz",
-    "wireless",
     "structs",
-    "usbutil",
+    "tinyuz",
     "tl_effects",
+    "usbutil",
+    "wireless",
 ]

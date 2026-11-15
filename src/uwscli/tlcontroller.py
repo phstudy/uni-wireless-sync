@@ -62,7 +62,10 @@ def set_motherboard_rpm_sync(enable: bool) -> None:
             for packet in packet_cache:
                 try:
                     device.write(packet)
-                except Exception as exc:  # pragma: no cover - hardware dependent
+                except (
+                    OSError,
+                    ValueError,
+                ) as exc:  # pragma: no cover - hardware dependent
                     logger.warning(
                         "TL controller %s write failed: %s",
                         label,
@@ -71,15 +74,15 @@ def set_motherboard_rpm_sync(enable: bool) -> None:
                     break
                 try:
                     device.read(LED_PACKET_LENGTH, timeout=50)
-                except Exception:
-                    pass
+                except (OSError, ValueError) as exc:
+                    logger.debug("TL controller %s gave no reply: %s", label, exc)
             else:
                 active += 1
         finally:
             try:
                 device.close()
-            except Exception:
-                pass
+            except (OSError, ValueError) as exc:
+                logger.debug("Closing TL controller %s failed: %s", label, exc)
 
     if active:
         logger.debug(
@@ -97,7 +100,7 @@ def _iterate_candidate_devices():
         descriptors = []
         try:
             descriptors = hid.enumerate(vid, pid) or []
-        except Exception as exc:  # pragma: no cover - hardware dependent
+        except (OSError, ValueError) as exc:  # pragma: no cover - hardware dependent
             logger.debug("Enumerate %04x:%04x failed: %s", vid, pid, exc)
         for info in descriptors:
             path = info.get("path")
@@ -114,7 +117,8 @@ def _iterate_candidate_devices():
             device = hid.device()
             try:
                 device.open_path(path_bytes)
-            except Exception:
+            except (OSError, ValueError) as exc:
+                logger.debug("Opening %r failed: %s", path_bytes, exc)
                 continue
             yield f"{vid:04x}:{pid:04x}@{path_bytes!r}", device
         key = (vid, pid, None)
@@ -123,7 +127,8 @@ def _iterate_candidate_devices():
         device = hid.device()
         try:
             device.open(vid, pid)
-        except Exception:
+        except (OSError, ValueError) as exc:
+            logger.debug("Opening %04x:%04x failed: %s", vid, pid, exc)
             continue
         seen.add(key)
         yield f"{vid:04x}:{pid:04x}", device

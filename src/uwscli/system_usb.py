@@ -6,19 +6,19 @@ import os
 import re
 import subprocess
 import sys
-from pathlib import Path
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any
 
 
 @dataclass
 class USBRecord:
     vendor_id: int
     product_id: int
-    product: Optional[str] = None
-    vendor: Optional[str] = None
-    serial: Optional[str] = None
-    location_id: Optional[int] = None
+    product: str | None = None
+    vendor: str | None = None
+    serial: str | None = None
+    location_id: int | None = None
 
 
 _VENDOR_RE = re.compile(r'"idVendor"\s*=\s*(\d+)')
@@ -29,14 +29,14 @@ _STRING_RE = re.compile(
 )
 
 
-def _read_text(path: Path) -> Optional[str]:
+def _read_text(path: Path) -> str | None:
     try:
         return path.read_text().strip()
     except (OSError, UnicodeDecodeError):
         return None
 
 
-def _parse_int(value: Optional[str], base: int = 10) -> Optional[int]:
+def _parse_int(value: str | None, base: int = 10) -> int | None:
     if value is None:
         return None
     value = value.strip()
@@ -48,9 +48,9 @@ def _parse_int(value: Optional[str], base: int = 10) -> Optional[int]:
         return None
 
 
-def _parse_ioreg(text: str) -> List[USBRecord]:
-    devices: List[USBRecord] = []
-    current: Dict[str, Any] | None = None
+def _parse_ioreg(text: str) -> list[USBRecord]:
+    devices: list[USBRecord] = []
+    current: dict[str, Any] | None = None
 
     def flush() -> None:
         nonlocal current
@@ -108,11 +108,11 @@ def _parse_ioreg(text: str) -> List[USBRecord]:
     return devices
 
 
-def _scan_linux_sysfs() -> List[USBRecord]:
+def _scan_linux_sysfs() -> list[USBRecord]:
     root = Path("/sys/bus/usb/devices")
     if not root.exists():
         return []
-    devices: List[USBRecord] = []
+    devices: list[USBRecord] = []
     for entry in root.iterdir():
         if ":" in entry.name or not entry.is_dir():
             continue
@@ -143,7 +143,7 @@ def _scan_linux_sysfs() -> List[USBRecord]:
     return devices
 
 
-def scan_usb_devices() -> List[USBRecord]:
+def scan_usb_devices() -> list[USBRecord]:
     if os.name != "posix":
         return []
     if sys.platform.startswith("linux"):
@@ -162,7 +162,7 @@ def scan_usb_devices() -> List[USBRecord]:
     return _parse_ioreg(result.stdout)
 
 
-def find_devices_by_vid_pid(vendor_id: int, product_id: int) -> List[USBRecord]:
+def find_devices_by_vid_pid(vendor_id: int, product_id: int) -> list[USBRecord]:
     return [
         rec
         for rec in scan_usb_devices()

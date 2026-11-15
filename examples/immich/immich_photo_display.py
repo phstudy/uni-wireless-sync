@@ -8,7 +8,6 @@ import random
 import sys
 import time
 from io import BytesIO
-from typing import List, Optional
 
 import requests
 from PIL import Image, ImageOps
@@ -27,8 +26,8 @@ def _search_assets(
     api_key: str,
     *,
     take: int = IMMICH_DEFAULT_TAKE,
-    person_id: Optional[str] = None,
-) -> List[dict]:
+    person_id: str | None = None,
+) -> list[dict]:
     """POST to Immich metadata search to retrieve candidate assets."""
     url = f"{base_url}/search/metadata"
     headers = {"x-api-key": api_key, "Content-Type": "application/json"}
@@ -39,12 +38,12 @@ def _search_assets(
     resp.raise_for_status()
     payload = resp.json()
     assets = (
-        payload.get("assets", {}).get("items")
-        if isinstance(payload, dict)
-        else payload
+        payload.get("assets", {}).get("items") if isinstance(payload, dict) else payload
     )
     if not assets:
-        raise SystemExit("No assets returned by Immich. Check permissions or adjust --take.")
+        raise SystemExit(
+            "No assets returned by Immich. Check permissions or adjust --take."
+        )
     if not isinstance(assets, list):
         raise SystemExit("Unexpected Immich response format when retrieving assets.")
     return assets
@@ -110,18 +109,30 @@ def _normalize_serial(serial: str) -> str:
     return value
 
 
-def resolve_lcd_serials(explicit: Optional[List[str]]) -> List[str]:
+def resolve_lcd_serials(explicit: list[str] | None) -> list[str]:
     if explicit:
         return [_normalize_serial(item) for item in explicit if item]
-    devices = [dev for dev in lcd.enumerate_devices() if dev.source == "wireless" and dev.serial_number]
+    devices = [
+        dev
+        for dev in lcd.enumerate_devices()
+        if dev.source == "wireless" and dev.serial_number
+    ]
     if not devices:
-        raise SystemExit("No wireless TL LCD devices detected. Connect one or pass --serial.")
+        raise SystemExit(
+            "No wireless TL LCD devices detected. Connect one or pass --serial."
+        )
     if len(devices) > 1:
-        choices = "\n".join(f"  {dev.serial_number}" for dev in devices if dev.serial_number)
-        raise SystemExit(f"Multiple TL LCDs detected; pass --serial from one of:\n{choices}")
+        choices = "\n".join(
+            f"  {dev.serial_number}" for dev in devices if dev.serial_number
+        )
+        raise SystemExit(
+            f"Multiple TL LCDs detected; pass --serial from one of:\n{choices}"
+        )
     serial_number = devices[0].serial_number
     if not serial_number:
-        raise SystemExit("Detected LCD is missing a serial number; specify --serial explicitly.")
+        raise SystemExit(
+            "Detected LCD is missing a serial number; specify --serial explicitly."
+        )
     return [_normalize_serial(serial_number)]
 
 
@@ -142,8 +153,14 @@ def push_to_lcd(jpeg_bytes: bytes, selector: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base-url", required=True, help="Immich server base URL (e.g. https://immich.local/api)")
-    parser.add_argument("--api-key", required=True, help="Immich API key with asset read permissions")
+    parser.add_argument(
+        "--base-url",
+        required=True,
+        help="Immich server base URL (e.g. https://immich.local/api)",
+    )
+    parser.add_argument(
+        "--api-key", required=True, help="Immich API key with asset read permissions"
+    )
     parser.add_argument(
         "--asset-id",
         action="append",
@@ -159,8 +176,15 @@ def main() -> None:
         action="append",
         help="USB serial of the Uni Fan TL LCD (repeat to target multiple panels)",
     )
-    parser.add_argument("--size", type=int, default=TARGET_SIZE, help="Square image size (default: 400)")
-    parser.add_argument("--take", type=int, default=IMMICH_DEFAULT_TAKE, help="Number of assets to sample when picking randomly (default: 1000)")
+    parser.add_argument(
+        "--size", type=int, default=TARGET_SIZE, help="Square image size (default: 400)"
+    )
+    parser.add_argument(
+        "--take",
+        type=int,
+        default=IMMICH_DEFAULT_TAKE,
+        help="Number of assets to sample when picking randomly (default: 1000)",
+    )
 
     args = parser.parse_args()
 
@@ -175,7 +199,9 @@ def main() -> None:
         else:
             person_id = person_ids[index] if index < len(person_ids) else None
             if person_id:
-                asset_id = fetch_asset_for_person(base_url, args.api_key, person_id, args.take)
+                asset_id = fetch_asset_for_person(
+                    base_url, args.api_key, person_id, args.take
+                )
             else:
                 asset_id = fetch_asset_id(base_url, args.api_key, args.take)
         image = download_image(asset_id, base_url, args.api_key)
@@ -183,7 +209,10 @@ def main() -> None:
         try:
             push_to_lcd(jpeg_bytes, selector)
         except lcd.LCDDeviceError as exc:
-            print(f"Failed to push asset {asset_id} to LCD {selector}: {exc}", file=sys.stderr)
+            print(
+                f"Failed to push asset {asset_id} to LCD {selector}: {exc}",
+                file=sys.stderr,
+            )
             continue
         print(f"Pushed asset {asset_id} to LCD {selector} at {args.size}x{args.size}.")
 
