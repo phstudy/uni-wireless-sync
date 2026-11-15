@@ -71,17 +71,50 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     send_jpg_parser = lcd_sub.add_parser(
-        "send-jpg", help="Send a JPEG frame to the LCD"
+        "send-jpg",
+        help="Show an image (JPEG or PNG) on the LCD",
+        description=(
+            "Show an image on the LCD. For the TL Wireless LCD the image is scaled to "
+            "400x400 and re-encoded as JPEG (quality 95, lowered until it fits in "
+            "100000 bytes), as the vendor app does."
+        ),
     )
     send_jpg_parser.add_argument(
-        "--file", required=True, type=Path, help="JPEG file path"
+        "--file", required=True, type=Path, help="Image file path (JPEG or PNG)"
     )
     send_jpg_parser.add_argument(
         "--serial", required=False, help="USB serial number of the LCD device"
     )
+    send_jpg_parser.add_argument(
+        "--raw",
+        action="store_true",
+        help="Send the file bytes unchanged (must already be a JPEG the panel accepts)",
+    )
+    send_jpg_parser.add_argument(
+        "--save",
+        action="store_true",
+        help="Also store the image as the power-on image (TL Wireless LCD only), as the vendor app does",
+    )
+
+    video_parser = lcd_sub.add_parser(
+        "play-video",
+        help="Play a video on the TL Wireless LCD (decoded here with FFmpeg, sent frame by frame)",
+    )
+    video_parser.add_argument("--file", required=True, type=Path, help="Video file path")
+    video_parser.add_argument(
+        "--serial", required=False, help="USB serial number of the LCD device"
+    )
+    video_parser.add_argument(
+        "--fps",
+        type=float,
+        help="Frames per second (default: the video's own frame rate)",
+    )
+    video_parser.add_argument(
+        "--loop", action="store_true", help="Repeat until interrupted (Ctrl+C)"
+    )
 
     keep_alive_parser = lcd_sub.add_parser(
-        "keep-alive", help="Send periodic keep-alive handshakes"
+        "keep-alive", help="Send periodic keep-alive messages"
     )
     keep_alive_parser.add_argument(
         "--serial", required=False, help="USB serial number of the LCD device"
@@ -89,8 +122,8 @@ def build_parser() -> argparse.ArgumentParser:
     keep_alive_parser.add_argument(
         "--interval",
         type=float,
-        default=5.0,
-        help="Seconds between keep-alive messages (default: 5)",
+        default=1.0,
+        help="Seconds between keep-alive messages (default: 1, as the vendor app)",
     )
 
     control_parser = lcd_sub.add_parser("control", help="Send an LCD control setting")
@@ -106,15 +139,25 @@ def build_parser() -> argparse.ArgumentParser:
         "--jpg-index", type=int, default=0, help="JPG index for show_jpg mode"
     )
     control_parser.add_argument(
-        "--brightness", type=int, default=50, help="LCD brightness 0-100"
+        "--brightness",
+        type=int,
+        choices=range(0, 101),
+        metavar="0-100",
+        help=(
+            "LCD brightness 0-100, sent as is. The vendor app's 0/25/50/75/100%% "
+            "steps send 0/10/30/40/100 to the TL Wireless LCD. "
+            "TL Wireless LCD: only what is given is changed; wired LCD: default 50"
+        ),
     )
     control_parser.add_argument("--fps", type=int, default=30, help="Video FPS")
     control_parser.add_argument(
         "--rotation",
         type=int,
-        default=0,
         choices=[0, 90, 180, 270],
-        help="Screen rotation in degrees",
+        help=(
+            "Screen rotation in degrees, as the vendor app names them. "
+            "TL Wireless LCD: only what is given is changed; wired LCD: default 0"
+        ),
     )
     control_parser.add_argument(
         "--test-color",
@@ -443,44 +486,100 @@ def handle_lcd(args: argparse.Namespace) -> None:
                 }
                 _emit_output(args, info, text=json.dumps(info, indent=2))
             elif args.command == "send-jpg":
-                jpg_payload = _load_file_bytes(args.file)
+                raw = _load_file_bytes(args.file)
+                if args.save and not device.is_wireless:
+                    raise SystemExit("--save is supported only on the TL Wireless LCD")
+                if device.is_wireless and not args.raw:
+                    jpg_payload = lcd.prepare_wireless_image(str(args.file))
+                else:
+                    jpg_payload = raw
                 device.send_jpg(jpg_payload)
+                if args.save:
+                    device.send_boot_jpg(jpg_payload)
                 _emit_output(
                     args,
-                    {"bytes_sent": len(jpg_payload)},
-                    text=f"Sent {len(jpg_payload)} bytes to LCD",
+                    {"bytes_sent": len(jpg_payload), "saved": bool(args.save)},
+                    text=f"Sent {len(jpg_payload)} bytes to LCD"
+                    + (" and saved it as the power-on image" if args.save else ""),
+                )
+            elif args.command == "play-video":
+                if not device.is_wireless:
+                    raise SystemExit("play-video is supported only on the TL Wireless LCD")
+                if not args.file.exists():
+                    raise SystemExit(f"File not found: {args.file}")
+                fps = args.fps or lcd.video_frame_rate(str(args.file))
+                if fps <= 0:
+                    raise SystemExit("--fps must be positive")
+                frames = _play_video(device, str(args.file), fps, args.loop)
+                _emit_output(
+                    args,
+                    {"frames_sent": frames, "fps": fps},
+                    text=f"Sent {frames} frames at {fps:g} fps",
                 )
             elif args.command == "control":
-                setting = LCDControlSetting(
-                    mode=lcd.mode_from_arg(args.mode),
-                    jpg_index=args.jpg_index,
-                    brightness=args.brightness,
-                    video_fps=args.fps,
-                    rotation=ScreenRotation.from_degrees(args.rotation),
-                    enable_test=args.enable_test,
-                    test_color=_parse_test_color(args.test_color),
-                )
-                device.control(setting)
+                if device.is_wireless:
+                    if args.brightness is None and args.rotation is None:
+                        raise SystemExit(
+                            "Give --brightness and/or --rotation for a TL Wireless LCD"
+                        )
+                    if args.brightness is not None:
+                        device.set_brightness(args.brightness)
+                    if args.rotation is not None:
+                        device.set_rotation(ScreenRotation.from_degrees(args.rotation))
+                else:
+                    setting = LCDControlSetting(
+                        mode=lcd.mode_from_arg(args.mode),
+                        jpg_index=args.jpg_index,
+                        brightness=50 if args.brightness is None else args.brightness,
+                        video_fps=args.fps,
+                        rotation=ScreenRotation.from_degrees(args.rotation or 0),
+                        enable_test=args.enable_test,
+                        test_color=_parse_test_color(args.test_color),
+                    )
+                    device.control(setting)
                 _emit_output(
                     args, {"status": "control_sent"}, text="LCD control command sent"
                 )
             elif args.command == "keep-alive":
-                interval = max(args.interval, 0.5)
+                interval = max(args.interval, 0.2)
                 print(
-                    f"Keeping LCD {serial} awake every {interval:.1f}s. Press Ctrl+C to stop."
+                    f"Keeping LCD {serial} awake every {interval:.1f}s. Press Ctrl+C to stop.",
+                    flush=True,
                 )
-                # Perform an initial handshake to confirm connectivity.
-                device.handshake()
+                device.keep_alive()
                 try:
                     while True:
                         time.sleep(interval)
-                        device.handshake()
+                        device.keep_alive()
                 except KeyboardInterrupt:
                     print("Keep-alive stopped.")
             else:
                 raise SystemExit("Unknown lcd command")
     except lcd.LCDDeviceError as exc:
         raise SystemExit(str(exc))
+
+
+def _play_video(device: Any, path: str, fps: float, loop: bool) -> int:
+    """Push decoded frames at a steady rate; returns how many were sent."""
+    period = 1.0 / fps
+    sent = 0
+    try:
+        while True:
+            deadline = time.monotonic()
+            for frame in lcd.iter_video_frames(path, fps):
+                device.send_jpg(frame)
+                sent += 1
+                deadline += period
+                delay = deadline - time.monotonic()
+                if delay > 0:
+                    time.sleep(delay)
+                else:
+                    deadline = time.monotonic()
+            if not loop or sent == 0:
+                break
+    except KeyboardInterrupt:
+        pass
+    return sent
 
 
 def handle_fan(args: argparse.Namespace) -> None:

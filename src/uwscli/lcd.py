@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
-import datetime
 import enum
+import io
+import subprocess
 import time
 from typing import Any, Dict, Iterator, List, Optional
 
@@ -112,12 +113,14 @@ def enumerate_devices() -> List[HidDeviceInfo]:
 
 
 class WirelessCommand(enum.IntEnum):
+    """Commands of the TL Wireless LCD (USB 1cbe:0006); values match the vendor app."""
+
     GET_VER = 10
     REBOOT = 11
     ROTATE = 13
     BRIGHTNESS = 14
     SET_FRAME_RATE = 15
-    UPDATE_FIRMWARE = 40
+    WRITE_FILE = 40  # writes a file on the panel (boot image, firmware)
     STOP_CLOCK = 41
     PUSH_JPG = 101
     START_PLAY = 121
@@ -133,6 +136,9 @@ class WirelessUSBTransport:
     _KEY = b"slv3tuzx"
     _HEADER_SIZE = 512
     _PAYLOAD_BUFFER = 102400
+    # The vendor app sets 120 fps every time it opens a TL Wireless LCD.
+    _OPEN_FRAME_RATE = 120
+    BOOT_IMAGE_PATH = "/usr/data/boot.jpg"
 
     def __init__(
         self,
@@ -159,32 +165,35 @@ class WirelessUSBTransport:
             serial_number=serial_number,
             location_id=location_id,
         )
-        utc_midnight = datetime.datetime.utcnow().replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
-        self._epoch = utc_midnight - datetime.timedelta(days=1)
+        self._epoch = time.monotonic()
         self._last_handshake = 0.0
+        self._opened = False
 
     def close(self) -> None:
         self._device.close()
         self._last_handshake = 0.0
+        self._opened = False
 
     def handshake(self) -> Dict[str, int]:
+        """Ask for the panel's position; the reply carries the LCD group index in byte 8."""
         response = self._send_command(WirelessCommand.GET_POS_INDEX, expect_reply=True)
         for _ in range(4):
             if response:
                 command = response[0]
                 if command == WirelessCommand.GET_POS_INDEX:
-                    mode = response[8] if len(response) > 8 else 0
-                    frame_index = response[9] if len(response) > 9 else 0
+                    group_index = response[8] if len(response) > 8 else 0
                     self._last_handshake = time.monotonic()
-                    return {"mode": mode, "frame_index": frame_index}
+                    return {"group_index": group_index}
                 if command == WirelessCommand.GET_VER:
                     self._parse_version(response)
                     self._last_handshake = time.monotonic()
-                    return {"mode": 0, "frame_index": 0}
+                    return {"group_index": 0}
             response = self._read_next()
         raise LCDDeviceError("No valid handshake response from wireless LCD")
+
+    def keep_alive(self) -> str:
+        """Heartbeat as the vendor app sends it (GetVer); returns the firmware string."""
+        return self.firmware_version()["version"]
 
     def firmware_version(self) -> Dict[str, str]:
         response = self._send_command(WirelessCommand.GET_VER, expect_reply=True)
@@ -197,22 +206,36 @@ class WirelessUSBTransport:
         raise LCDDeviceError("Firmware request did not return expected data")
 
     def _ensure_awake(self) -> None:
+        if not self._opened:
+            self._opened = True
+            self._send_command(
+                WirelessCommand.SET_FRAME_RATE,
+                single_byte=self._OPEN_FRAME_RATE,
+                drain_response=True,
+            )
         now = time.monotonic()
         if self._last_handshake and now - self._last_handshake <= 2.0:
             return
         self.handshake()
 
     def control(self, setting: LCDControlSetting) -> None:
+        """Only brightness and rotation apply to the wireless panel."""
+        self.set_brightness(setting.brightness)
+        self.set_rotation(setting.rotation)
+
+    def set_brightness(self, brightness: int) -> None:
         self._ensure_awake()
-        brightness = max(0, min(100, setting.brightness))
         self._send_command(
             WirelessCommand.BRIGHTNESS,
-            single_byte=brightness,
+            single_byte=max(0, min(100, brightness)),
             drain_response=True,
         )
+
+    def set_rotation(self, rotation: ScreenRotation) -> None:
+        self._ensure_awake()
         self._send_command(
             WirelessCommand.ROTATE,
-            single_byte=setting.rotation.value,
+            single_byte=wireless_rotation_value(rotation),
             drain_response=True,
         )
 
@@ -229,7 +252,10 @@ class WirelessUSBTransport:
         self.send_jpg(payload)
 
     def send_boot_jpg(self, payload: bytes) -> None:
-        self.send_jpg(payload)
+        """Store a JPEG as the image the panel shows at power-on (command 40)."""
+        self._ensure_awake()
+        self._write_checked(self._build_file_packet(self.BOOT_IMAGE_PATH, payload))
+        self._drain_optional_response()
 
     def send_boot_video(self, payload: bytes) -> None:
         raise LCDDeviceError(
@@ -246,8 +272,15 @@ class WirelessUSBTransport:
         )
 
     def _timestamp_ms(self) -> int:
-        delta = datetime.datetime.utcnow() - self._epoch
-        return int(delta.total_seconds() * 1000) & 0xFFFFFFFF
+        # Milliseconds since this transport was opened (the vendor app counts from its start).
+        return int((time.monotonic() - self._epoch) * 1000) & 0xFFFFFFFF
+
+    def _write_checked(self, packet: bytes) -> None:
+        written = self._write_with_recovery(packet)
+        if written != len(packet):
+            raise LCDDeviceError(
+                f"Incomplete wireless USB write ({written}/{len(packet)})"
+            )
 
     def _send_command(
         self,
@@ -259,11 +292,7 @@ class WirelessUSBTransport:
         drain_response: bool = False,
     ) -> bytes:
         packet = self._build_packet(command, payload=payload, single_byte=single_byte)
-        written = self._write_with_recovery(packet)
-        if written != len(packet):
-            raise LCDDeviceError(
-                f"Incomplete wireless USB write ({written}/{len(packet)})"
-            )
+        self._write_checked(packet)
         if expect_reply:
             return self._device.read(self._HEADER_SIZE)
         if drain_response:
@@ -311,11 +340,7 @@ class WirelessUSBTransport:
         payload: Optional[bytes],
         single_byte: Optional[int],
     ) -> bytes:
-        header = bytearray(504)
-        header[0] = command & 0xFF
-        header[2] = 26
-        header[3] = 109
-        header[4:8] = self._timestamp_ms().to_bytes(4, "little", signed=False)
+        header = self._base_header(command)
         if payload is not None:
             if len(payload) > self._PAYLOAD_BUFFER - self._HEADER_SIZE:
                 raise LCDDeviceError("Payload too large for wireless LCD transfer")
@@ -332,6 +357,31 @@ class WirelessUSBTransport:
         packet = bytearray(packet_length)
         packet[: len(encrypted_header)] = encrypted_header
         packet[self._HEADER_SIZE : self._HEADER_SIZE + len(payload)] = payload
+        return bytes(packet)
+
+    def _base_header(self, command: int) -> bytearray:
+        header = bytearray(504)
+        header[0] = command & 0xFF
+        header[2] = 26
+        header[3] = 109
+        header[4:8] = self._timestamp_ms().to_bytes(4, "little", signed=False)
+        return header
+
+    def _build_file_packet(self, target: str, data: bytes) -> bytes:
+        """Command 40: [8:12] path length, [12:16] data length (big endian), [16:] path, data at 512."""
+        path = target.encode("ascii")
+        if len(data) > self._PAYLOAD_BUFFER - self._HEADER_SIZE:
+            raise LCDDeviceError("File too large for wireless LCD transfer")
+        if 16 + len(path) > 504:
+            raise LCDDeviceError("Target path too long")
+        header = self._base_header(WirelessCommand.WRITE_FILE)
+        header[8:12] = len(path).to_bytes(4, "big")
+        header[12:16] = len(data).to_bytes(4, "big")
+        header[16 : 16 + len(path)] = path
+        packet = bytearray(self._PAYLOAD_BUFFER)
+        encrypted = self._encrypt(bytes(header))
+        packet[: len(encrypted)] = encrypted
+        packet[self._HEADER_SIZE : self._HEADER_SIZE + len(data)] = data
         return bytes(packet)
 
     def _encrypt(self, data: bytes) -> bytes:
@@ -538,6 +588,18 @@ class TLLCDDevice:
         frame_index = (payload[1] << 8) | payload[2]
         return {"mode": mode, "frame_index": frame_index}
 
+    @property
+    def is_wireless(self) -> bool:
+        return self._backend == "wireless"
+
+    def keep_alive(self) -> None:
+        if self._backend == "wireless":
+            if not self._wireless:
+                raise LCDDeviceError("Wireless transport is unavailable")
+            self._wireless.keep_alive()
+            return
+        self.handshake()
+
     def firmware_version(self) -> Dict[str, str]:
         if self._backend == "wireless":
             if not self._wireless:
@@ -557,6 +619,19 @@ class TLLCDDevice:
             .decode("ascii", errors="ignore")
         )
         return {"version": version, "build": build_date}
+
+    def set_brightness(self, brightness: int) -> None:
+        """TL Wireless LCD only: brightness has its own command there."""
+        self._require_wireless().set_brightness(brightness)
+
+    def set_rotation(self, rotation: ScreenRotation) -> None:
+        """TL Wireless LCD only: rotation has its own command there."""
+        self._require_wireless().set_rotation(rotation)
+
+    def _require_wireless(self) -> "WirelessUSBTransport":
+        if self._backend != "wireless" or not self._wireless:
+            raise LCDDeviceError("This command needs a TL Wireless LCD")
+        return self._wireless
 
     def control(self, setting: LCDControlSetting) -> None:
         if self._backend == "wireless":
@@ -605,6 +680,128 @@ class TLLCDDevice:
             self._wireless.send_boot_video(payload)
             return
         self._write(0x47, payload, expect_reply=True)
+
+
+def wireless_rotation_value(rotation: ScreenRotation) -> int:
+    """Byte the TL Wireless LCD expects for a rotation: the vendor app sends (r + 1) % 4."""
+    return (rotation.value + 1) % 4
+
+
+WIRELESS_SIZE = (400, 400)
+WIRELESS_MAX_JPEG = 100000
+WIRELESS_JPEG_QUALITY = 95
+
+
+def encode_wireless_jpeg(image: Any) -> bytes:
+    """Scale a Pillow image to the panel and encode it as the vendor app does.
+
+    400x400, JPEG quality 95, lowered in steps of 5 until the file fits in 100000 bytes.
+    """
+    frame = image.convert("RGB")
+    if frame.size != WIRELESS_SIZE:
+        frame = frame.resize(WIRELESS_SIZE)
+    quality = WIRELESS_JPEG_QUALITY
+    while True:
+        buffer = io.BytesIO()
+        frame.save(buffer, format="JPEG", quality=quality)
+        data = buffer.getvalue()
+        if len(data) <= WIRELESS_MAX_JPEG or quality <= 5:
+            return data
+        quality -= 5
+
+
+def prepare_wireless_image(path: str) -> bytes:
+    """Read a JPEG or PNG file and return the JPEG bytes to push to the wireless panel."""
+    try:
+        from PIL import Image
+    except ImportError as exc:  # pragma: no cover - Pillow is a dependency
+        raise LCDDeviceError("Pillow is required to prepare images") from exc
+    try:
+        with Image.open(path) as image:
+            return encode_wireless_jpeg(image)
+    except OSError as exc:
+        raise LCDDeviceError(f"Cannot read image {path}: {exc}") from exc
+
+
+def video_frame_rate(path: str) -> float:
+    """Average frame rate of a video file, read with ffprobe."""
+    try:
+        out = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=avg_frame_rate",
+                "-of",
+                "default=nw=1:nk=1",
+                path,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except FileNotFoundError as exc:
+        raise LCDDeviceError("ffprobe (FFmpeg) is required to play videos") from exc
+    except subprocess.CalledProcessError as exc:
+        raise LCDDeviceError(f"Cannot read video {path}: {exc.stderr.strip()}") from exc
+    num, _, den = out.partition("/")
+    try:
+        rate = float(num) / float(den or 1)
+    except (ValueError, ZeroDivisionError):
+        rate = 0.0
+    return rate if rate > 0 else 30.0
+
+
+def iter_video_frames(path: str, fps: float) -> Iterator[bytes]:
+    """Decode a video with ffmpeg into panel-ready JPEG frames at the given rate."""
+    try:
+        from PIL import Image
+    except ImportError as exc:  # pragma: no cover - Pillow is a dependency
+        raise LCDDeviceError("Pillow is required to play videos") from exc
+    width, height = WIRELESS_SIZE
+    frame_size = width * height * 3
+    try:
+        proc = subprocess.Popen(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-i",
+                path,
+                "-vf",
+                f"fps={fps},scale={width}:{height}",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "-",
+            ],
+            stdout=subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:
+        raise LCDDeviceError("ffmpeg is required to play videos") from exc
+    assert proc.stdout is not None
+    finished = False
+    try:
+        while True:
+            raw = proc.stdout.read(frame_size)
+            if len(raw) < frame_size:
+                break
+            yield encode_wireless_jpeg(Image.frombytes("RGB", WIRELESS_SIZE, raw))
+        finished = True
+    finally:
+        if not finished:
+            # Stopped early (Ctrl+C, a send error): stop ffmpeg before closing its output,
+            # so it does not report a broken pipe.
+            proc.kill()
+        proc.stdout.close()
+        proc.wait()
+    # Every frame was read: ffmpeg's own exit code tells whether the video decoded cleanly.
+    if proc.returncode != 0:
+        raise LCDDeviceError(f"ffmpeg failed on {path} (exit {proc.returncode})")
 
 
 def rotation_from_arg(value: int) -> ScreenRotation:

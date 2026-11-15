@@ -25,6 +25,7 @@ dependencies = [
   "hidapi>=0.14",
   "pyusb>=1.2",
   "pycryptodomex>=3.17",
+  "Pillow>=10.0",
 ]
 
 [project.optional-dependencies]
@@ -35,7 +36,6 @@ dev = [
   "black>=24.0",
   "mypy>=1.8",
 ]
-images = ["Pillow>=10.0"]
 
 [project.urls]
 Homepage = "https://github.com/phstudy/uni-wireless-sync"
