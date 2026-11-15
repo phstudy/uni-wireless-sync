@@ -71,7 +71,9 @@ def test_header_layout(transport):
     ],
 )
 def test_rotation_is_sent_as_the_vendor_app_does(transport, rotation, sent):
-    transport.control(LCDControlSetting(LCDControlMode.SHOW_JPG, brightness=40, rotation=rotation))
+    transport.control(
+        LCDControlSetting(LCDControlMode.SHOW_JPG, brightness=40, rotation=rotation)
+    )
     by_cmd = {h[0]: h for h in transport._device.headers()}
     assert by_cmd[lcd.WirelessCommand.ROTATE][8] == sent
     assert by_cmd[lcd.WirelessCommand.BRIGHTNESS][8] == 40
@@ -130,7 +132,12 @@ def _png(size, noise=False):
         import random
 
         rnd = random.Random(1)
-        image.putdata([(rnd.randrange(256), rnd.randrange(256), rnd.randrange(256)) for _ in range(size[0] * size[1])])
+        image.putdata(
+            [
+                (rnd.randrange(256), rnd.randrange(256), rnd.randrange(256))
+                for _ in range(size[0] * size[1])
+            ]
+        )
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
     return buffer.getvalue()
@@ -179,7 +186,19 @@ def test_cli_send_jpg_prepares_and_saves(monkeypatch, tmp_path, capsys):
     path.write_bytes(_png((100, 50)))
     device = DummyLCD()
     _use(monkeypatch, device)
-    cli.main(["--output", "json", "lcd", "send-jpg", "--serial", "x", "--file", str(path), "--save"])
+    cli.main(
+        [
+            "--output",
+            "json",
+            "lcd",
+            "send-jpg",
+            "--serial",
+            "x",
+            "--file",
+            str(path),
+            "--save",
+        ]
+    )
     out = json.loads(capsys.readouterr().out)
     assert out["saved"] is True and device.boot == device.sent
     assert device.sent[0][:2] == b"\xff\xd8"
@@ -209,9 +228,24 @@ def test_cli_play_video_pushes_every_frame(monkeypatch, tmp_path, capsys):
     path.write_bytes(b"x")
     device = DummyLCD()
     _use(monkeypatch, device)
-    monkeypatch.setattr(lcd, "iter_video_frames", lambda p, fps: iter([b"f1", b"f2", b"f3"]))
+    monkeypatch.setattr(
+        lcd, "iter_video_frames", lambda p, fps: iter([b"f1", b"f2", b"f3"])
+    )
     monkeypatch.setattr(cli.time, "sleep", lambda s: None)
-    cli.main(["--output", "json", "lcd", "play-video", "--serial", "x", "--file", str(path), "--fps", "50"])
+    cli.main(
+        [
+            "--output",
+            "json",
+            "lcd",
+            "play-video",
+            "--serial",
+            "x",
+            "--file",
+            str(path),
+            "--fps",
+            "50",
+        ]
+    )
     assert device.sent == [b"f1", b"f2", b"f3"]
     assert json.loads(capsys.readouterr().out)["frames_sent"] == 3
 

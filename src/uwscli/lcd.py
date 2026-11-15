@@ -8,13 +8,17 @@ import enum
 import io
 import subprocess
 import time
-from typing import Any, Dict, Iterator, List, Optional
+from collections.abc import Iterator
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from typing_extensions import Self
+
+import hid
 
 from .structs import LCDControlMode, LCDControlSetting, ScreenRotation
 from .system_usb import find_devices_by_vid_pid
 from .usbutil import USBEndpointDevice, USBError
-
-import hid
 
 DES: Any
 Padding: Any
@@ -59,15 +63,15 @@ class HidDeviceInfo:
     path: str
     vendor_id: int
     product_id: int
-    serial_number: Optional[str]
-    manufacturer: Optional[str]
-    product: Optional[str]
+    serial_number: str | None
+    manufacturer: str | None
+    product: str | None
     source: str = "hid"
-    location_id: Optional[int] = None
+    location_id: int | None = None
 
 
-def enumerate_devices() -> List[HidDeviceInfo]:
-    devices: List[HidDeviceInfo] = []
+def enumerate_devices() -> list[HidDeviceInfo]:
+    devices: list[HidDeviceInfo] = []
     for vendor_id, product_id in KNOWN_LCD_IDS:
         found_for_pair = False
         for entry in hid.enumerate(vendor_id, product_id):
@@ -101,7 +105,7 @@ def enumerate_devices() -> List[HidDeviceInfo]:
                         location_id=record.location_id,
                     ),
                 )
-    unique: List[HidDeviceInfo] = []
+    unique: list[HidDeviceInfo] = []
     seen = set()
     for dev in devices:
         key = (dev.path, dev.serial_number, dev.vendor_id, dev.product_id)
@@ -146,8 +150,8 @@ class WirelessUSBTransport:
         product_id: int,
         timeout_ms: int = 5000,
         *,
-        serial_number: Optional[str] = None,
-        location_id: Optional[int] = None,
+        serial_number: str | None = None,
+        location_id: int | None = None,
     ) -> None:
         self._vendor_id = vendor_id
         self._product_id = product_id
@@ -174,7 +178,7 @@ class WirelessUSBTransport:
         self._last_handshake = 0.0
         self._opened = False
 
-    def handshake(self) -> Dict[str, int]:
+    def handshake(self) -> dict[str, int]:
         """Ask for the panel's position; the reply carries the LCD group index in byte 8."""
         response = self._send_command(WirelessCommand.GET_POS_INDEX, expect_reply=True)
         for _ in range(4):
@@ -195,7 +199,7 @@ class WirelessUSBTransport:
         """Heartbeat as the vendor app sends it (GetVer); returns the firmware string."""
         return self.firmware_version()["version"]
 
-    def firmware_version(self) -> Dict[str, str]:
+    def firmware_version(self) -> dict[str, str]:
         response = self._send_command(WirelessCommand.GET_VER, expect_reply=True)
         for _ in range(4):
             if response and response[0] == WirelessCommand.GET_VER:
@@ -286,8 +290,8 @@ class WirelessUSBTransport:
         self,
         command: WirelessCommand,
         *,
-        payload: Optional[bytes] = None,
-        single_byte: Optional[int] = None,
+        payload: bytes | None = None,
+        single_byte: int | None = None,
         expect_reply: bool = False,
         drain_response: bool = False,
     ) -> bytes:
@@ -337,8 +341,8 @@ class WirelessUSBTransport:
         self,
         command: WirelessCommand,
         *,
-        payload: Optional[bytes],
-        single_byte: Optional[int],
+        payload: bytes | None,
+        single_byte: int | None,
     ) -> bytes:
         header = self._base_header(command)
         if payload is not None:
@@ -417,9 +421,9 @@ class TLLCDDevice:
 
     def __init__(self, serial: str) -> None:
         self._backend = "hid"
-        self._hid: Optional[hid.Device] = None
-        self._usb: Optional[USBEndpointDevice] = None
-        self._wireless: Optional[WirelessUSBTransport] = None
+        self._hid: hid.Device | None = None
+        self._usb: USBEndpointDevice | None = None
+        self._wireless: WirelessUSBTransport | None = None
         normalized = serial.strip()
         if not normalized:
             raise LCDDeviceError("Serial selector cannot be empty")
@@ -487,7 +491,7 @@ class TLLCDDevice:
             self._wireless.close()
             self._wireless = None
 
-    def __enter__(self) -> "TLLCDDevice":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
@@ -500,7 +504,7 @@ class TLLCDDevice:
             packet[0] = LCD_REPORT_ID
             packet[1] = command
             return iter([bytes(packet)])
-        packets: List[bytes] = []
+        packets: list[bytes] = []
         packet_number = 0
         offset = 0
         while offset < data_length:
@@ -517,10 +521,10 @@ class TLLCDDevice:
             packet_number += 1
         return iter(packets)
 
-    def _write(self, command: int, data: bytes, expect_reply: bool) -> List[bytes]:
+    def _write(self, command: int, data: bytes, expect_reply: bool) -> list[bytes]:
         if self._backend == "wireless":
             raise LCDDeviceError("Wireless LCD backend does not support HID framing")
-        responses: List[bytes] = []
+        responses: list[bytes] = []
         packets = list(self._build_packets(command, data))
         if not packets:
             packets = [
@@ -573,7 +577,7 @@ class TLLCDDevice:
             )
         raise LCDDeviceError("LCD device is not open")
 
-    def handshake(self) -> Dict[str, int]:
+    def handshake(self) -> dict[str, int]:
         if self._backend == "wireless":
             if not self._wireless:
                 raise LCDDeviceError("Wireless transport is unavailable")
@@ -600,7 +604,7 @@ class TLLCDDevice:
             return
         self.handshake()
 
-    def firmware_version(self) -> Dict[str, str]:
+    def firmware_version(self) -> dict[str, str]:
         if self._backend == "wireless":
             if not self._wireless:
                 raise LCDDeviceError("Wireless transport is unavailable")
@@ -628,7 +632,7 @@ class TLLCDDevice:
         """TL Wireless LCD only: rotation has its own command there."""
         self._require_wireless().set_rotation(rotation)
 
-    def _require_wireless(self) -> "WirelessUSBTransport":
+    def _require_wireless(self) -> WirelessUSBTransport:
         if self._backend != "wireless" or not self._wireless:
             raise LCDDeviceError("This command needs a TL Wireless LCD")
         return self._wireless

@@ -5,7 +5,10 @@ from __future__ import annotations
 import contextlib
 import time
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from typing_extensions import Self
 
 import usb.core
 import usb.util
@@ -42,13 +45,13 @@ class USBEndpointDevice:
         vendor_id: int,
         product_id: int,
         *,
-        write_endpoint: Optional[int] = 0x01,
-        read_endpoint: Optional[int] = 0x81,
-        interface: Optional[int] = 0,
-        configuration: Optional[int] = None,
+        write_endpoint: int | None = 0x01,
+        read_endpoint: int | None = 0x81,
+        interface: int | None = 0,
+        configuration: int | None = None,
         timeout_ms: int = 1000,
-        serial_number: Optional[str] = None,
-        location_id: Optional[int] = None,
+        serial_number: str | None = None,
+        location_id: int | None = None,
     ) -> None:
         self.vendor_id = vendor_id
         self.product_id = product_id
@@ -64,7 +67,7 @@ class USBEndpointDevice:
     def device(self) -> usb.core.Device:
         return self._device
 
-    def _open_device(self, configuration: Optional[int]) -> usb.core.Device:
+    def _open_device(self, configuration: int | None) -> usb.core.Device:
         try:
             if self._serial_number is not None or self._location_id is not None:
                 dev = usb.core.find(
@@ -119,9 +122,9 @@ class USBEndpointDevice:
 
     def _claim_interface(
         self,
-        interface: Optional[int],
-        write_ep: Optional[int],
-        read_ep: Optional[int],
+        interface: int | None,
+        write_ep: int | None,
+        read_ep: int | None,
     ) -> tuple[int, USBEndpoints]:
         cfg = self._device.get_active_configuration()
         candidates = []
@@ -138,7 +141,7 @@ class USBEndpointDevice:
                 if self._device.is_kernel_driver_active(intf_num):
                     self._device.detach_kernel_driver(intf_num)
             claimed = False
-            last_error: Optional[usb.core.USBError] = None
+            last_error: usb.core.USBError | None = None
             for attempt in range(5):
                 try:
                     usb.util.claim_interface(self._device, intf_num)
@@ -164,12 +167,11 @@ class USBEndpointDevice:
             ep_in = None
             for ep in intf:
                 addr = ep.bEndpointAddress
-                if usb.util.endpoint_direction(addr) == usb.util.ENDPOINT_OUT:
-                    if write_ep is None or addr == write_ep:
-                        ep_out = ep
-                elif usb.util.endpoint_direction(addr) == usb.util.ENDPOINT_IN:
-                    if read_ep is None or addr == read_ep:
-                        ep_in = ep
+                direction = usb.util.endpoint_direction(addr)
+                if direction == usb.util.ENDPOINT_OUT and write_ep in (None, addr):
+                    ep_out = ep
+                elif direction == usb.util.ENDPOINT_IN and read_ep in (None, addr):
+                    ep_in = ep
             if ep_out is None and write_ep is None:
                 ep_out = usb.util.find_descriptor(
                     intf,
@@ -191,13 +193,13 @@ class USBEndpointDevice:
             usb.util.release_interface(self._device, intf_num)
         raise USBError("Could not locate suitable interface/endpoints for device")
 
-    def write(self, payload: bytes) -> int:
+    def write(self, payload: bytes | bytearray) -> int:
         try:
             return self._endpoints.out.write(payload, self.timeout_ms)
         except usb.core.USBError as exc:
             raise USBError(f"USB write failed: {exc}") from exc
 
-    def read(self, size: int, timeout_ms: Optional[int] = None) -> bytes:
+    def read(self, size: int, timeout_ms: int | None = None) -> bytes:
         try:
             timeout = self.timeout_ms if timeout_ms is None else timeout_ms
             data = self._endpoints.inn.read(size, timeout)
@@ -212,7 +214,7 @@ class USBEndpointDevice:
                 self._device.attach_kernel_driver(self._interface)
             usb.util.dispose_resources(self._device)
 
-    def __enter__(self) -> "USBEndpointDevice":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:

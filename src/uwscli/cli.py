@@ -6,9 +6,10 @@ import argparse
 import json
 import random
 import time
+from collections.abc import Iterable
 from importlib import metadata
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple, cast
+from typing import Any, cast
 
 from . import lcd, tl_effects, tlcontroller, wireless
 from .logging_utils import configure_logging
@@ -100,7 +101,9 @@ def build_parser() -> argparse.ArgumentParser:
         "play-video",
         help="Play a video on the TL Wireless LCD (decoded here with FFmpeg, sent frame by frame)",
     )
-    video_parser.add_argument("--file", required=True, type=Path, help="Video file path")
+    video_parser.add_argument(
+        "--file", required=True, type=Path, help="Video file path"
+    )
     video_parser.add_argument(
         "--serial", required=False, help="USB serial number of the LCD device"
     )
@@ -141,7 +144,7 @@ def build_parser() -> argparse.ArgumentParser:
     control_parser.add_argument(
         "--brightness",
         type=int,
-        choices=range(0, 101),
+        choices=range(101),
         metavar="0-100",
         help=(
             "LCD brightness 0-100, sent as is. The vendor app's 0/25/50/75/100%% "
@@ -178,7 +181,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="List master controllers discovered via RF dongle",
     )
 
-    set_fan_parser = fan_sub.add_parser("set-fan", help="Send PWM to a wireless receiver")
+    set_fan_parser = fan_sub.add_parser(
+        "set-fan", help="Send PWM to a wireless receiver"
+    )
     fan_target = set_fan_parser.add_mutually_exclusive_group(required=True)
     fan_target.add_argument(
         "--mac",
@@ -197,8 +202,7 @@ def build_parser() -> argparse.ArgumentParser:
     set_fan_parser.add_argument(
         "--sequence-index",
         type=int,
-        default=1,
-        help="Sequence index used by the RF command (default: 1)",
+        help="Device number sent with the command (default: its position among this master's devices, as the vendor app)",
     )
 
     effect_names = sorted(effect.name.lower() for effect in tl_effects.TLEffects)
@@ -206,7 +210,9 @@ def build_parser() -> argparse.ArgumentParser:
     set_led_parser = fan_sub.add_parser(
         "set-led", help="Set LED effects on wireless receivers"
     )
-    led_target = set_led_parser.add_mutually_exclusive_group(required=True)
+    # One of --mac/--all is required, except that --mode merge may take --order instead
+    # (checked in handle_fan).
+    led_target = set_led_parser.add_mutually_exclusive_group(required=False)
     led_target.add_argument(
         "--mac", help="MAC address of the wireless receiver (aa:bb:cc:dd:ee:ff)"
     )
@@ -215,7 +221,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     set_led_parser.add_argument(
         "--mode",
-        choices=["static", "rainbow", "frames", "effect", "random-effect"],
+        choices=["static", "rainbow", "frames", "effect", "random-effect", "merge"],
         default="static",
         help="LED effect mode (default: static)",
     )
@@ -236,8 +242,42 @@ def build_parser() -> argparse.ArgumentParser:
     set_led_parser.add_argument(
         "--interval-ms",
         type=int,
-        default=50,
-        help="Frame interval in milliseconds for rainbow mode (default: 50)",
+        help="Frame interval in milliseconds (default: 50; effect modes: from --speed)",
+    )
+    set_led_parser.add_argument(
+        "--speed",
+        type=int,
+        choices=range(1, 6),
+        default=tl_effects.DEFAULT_SPEED,
+        metavar="1-5",
+        help=(
+            "Effect speed level as in the vendor app (its 0/25/50/75/100%% steps; "
+            f"default: {tl_effects.DEFAULT_SPEED}, the app's default)"
+        ),
+    )
+    set_led_parser.add_argument(
+        "--order",
+        help=(
+            "merge mode: comma separated MACs of the fan groups in the order the effect "
+            "runs through them (default: every bound group, in list order)"
+        ),
+    )
+    set_led_parser.add_argument(
+        "--reverse",
+        help="merge mode: comma separated MACs of groups that run the effect the other way",
+    )
+    set_led_parser.add_argument(
+        "--flip",
+        action="store_true",
+        help="Swap the front and behind halves of every fan (the vendor app's up/down swap)",
+    )
+    set_led_parser.add_argument(
+        "--effect-colors",
+        help=(
+            "The effect's colours (R,G,B;R,G,B;..., up to four), as on the vendor app's "
+            "lighting page (default: the app's defaults for each effect). Only the nine "
+            "computed effects accept other colours"
+        ),
     )
     set_led_parser.add_argument(
         "--frames-file",
@@ -253,14 +293,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--effect-brightness",
         type=int,
         default=255,
-        help="Brightness (0-255) applied when mode=effect (default: 255)",
+        help=(
+            "Brightness (0-255) applied when mode=effect (default: 255). The vendor app "
+            "has 5 levels (0, 64, 128, 192, 255); pre-rendered effects use the closest one"
+        ),
     )
     set_led_parser.add_argument(
         "--effect-direction",
         type=int,
         choices=[0, 1],
-        default=1,
-        help="Direction for TL effects (0=reverse, 1=forward; default: 1)",
+        default=0,
+        help="Direction: 0 clockwise (the vendor app's default), 1 counter-clockwise",
     )
     set_led_parser.add_argument(
         "--effect-scope",
@@ -277,12 +320,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     bind_parser.add_argument(
         "--master-mac",
-        help="Master MAC to bind against (defaults to first bound device)",
+        help="Expected MAC of the attached master (checked; binding always uses the attached master)",
     )
     bind_parser.add_argument(
         "--rx-type",
         type=int,
-        help="Optional RX type (1-15). Auto-selects when omitted.",
+        choices=range(1, 14),
+        metavar="1-13",
+        help="RX slot (1-13). Default: the first free one.",
     )
 
     unbind_parser = fan_sub.add_parser(
@@ -292,12 +337,43 @@ def build_parser() -> argparse.ArgumentParser:
         "--mac", required=True, help="MAC address of the wireless receiver to unbind"
     )
 
+    identify_parser = fan_sub.add_parser(
+        "identify", help="Make a wireless device flash so you can find it"
+    )
+    identify_parser.add_argument(
+        "--mac", required=True, help="MAC address of the device"
+    )
+
+    reboot_parser = fan_sub.add_parser(
+        "reboot-lcd", help="Restart the LCD panels of a TL Wireless LCD fan over RF"
+    )
+    reboot_parser.add_argument("--mac", required=True, help="MAC address of the device")
+
+    channel_parser = fan_sub.add_parser(
+        "set-channel",
+        help="Move every device bound to the attached controller to another RF channel",
+    )
+    channel_parser.add_argument(
+        "--channel",
+        type=int,
+        required=True,
+        choices=[*wireless.CHANNELS, wireless.DEFAULT_MASTER_CHANNEL],
+        metavar="CHANNEL",
+        help=(
+            "The vendor app's channels: "
+            + ", ".join(map(str, wireless.CHANNELS))
+            + f"; {wireless.DEFAULT_MASTER_CHANNEL} is its automatic default"
+        ),
+    )
+
     sync_parser = fan_sub.add_parser(
         "pwm-sync",
         help="Synchronize fan receivers using controller polling (default) or motherboard PWM pass-through",
     )
     sync_target = sync_parser.add_mutually_exclusive_group(required=False)
-    sync_target.add_argument("--mac", help="MAC address of the wireless receiver to update")
+    sync_target.add_argument(
+        "--mac", help="MAC address of the wireless receiver to update"
+    )
     sync_target.add_argument(
         "--all",
         action="store_true",
@@ -307,7 +383,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--mode",
         choices=["controller", "receiver"],
         default="receiver",
-        help="Sync mode: receiver (default, set PWM=6) or controller (legacy poll)",
+        help=(
+            "receiver (default): send PWM 6,6,6,6 once so the device follows the motherboard "
+            "itself; as the vendor app, only devices whose MAC ends in e1. "
+            "controller: read the motherboard PWM from the receiver and send it to the fans in a loop"
+        ),
     )
     sync_parser.add_argument(
         "--interval",
@@ -323,8 +403,7 @@ def build_parser() -> argparse.ArgumentParser:
     sync_parser.add_argument(
         "--sequence-index",
         type=int,
-        default=1,
-        help="Sequence index used by the RF command (receiver mode only; default: 1)",
+        help="Device number sent with the command (receiver mode only; default: automatic)",
     )
 
     return parser
@@ -430,7 +509,7 @@ def _load_frames_file(path: Path) -> list[list[tuple[int, int, int]]]:
                     rgb_tuple = tuple(int(v) for v in item)
                 except ValueError as exc:
                     raise SystemExit("Frame colors must be integers") from exc
-                rgb_cast = cast(Tuple[int, int, int], rgb_tuple)
+                rgb_cast = cast(tuple[int, int, int], rgb_tuple)
                 for v in rgb_cast:
                     if not 0 <= v <= 255:
                         raise SystemExit("Frame color values must be between 0 and 255")
@@ -441,7 +520,65 @@ def _load_frames_file(path: Path) -> list[list[tuple[int, int, int]]]:
     return frames
 
 
-def _ensure_pwm_values(args) -> List[int]:
+def _effect_colours_arg(args: argparse.Namespace) -> list[list[int]] | None:
+    """--effect-colors for every effect mode: at most four colours, as the vendor app."""
+    if not args.effect_colors:
+        return None
+    colours = [list(c) for c in _parse_color_list(args.effect_colors)]
+    if len(colours) > 4:
+        raise SystemExit("--effect-colors takes at most four colours")
+    return colours
+
+
+def _set_led_merge(args: argparse.Namespace) -> None:
+    if not args.effect:
+        raise SystemExit("--effect is required for merge mode")
+    if args.flip:
+        raise SystemExit(
+            "--flip does nothing in merge mode (both halves of every fan show the same strip)"
+        )
+    effect = tl_effects.TLEffects[args.effect.upper()]
+    colours = _effect_colours_arg(args)
+    try:
+        with wireless.WirelessTransceiver() as tx:
+            if args.order:
+                order = [m.strip() for m in args.order.split(",") if m.strip()]
+            elif args.all:
+                order = [d.mac for d in tx.list_devices().devices if d.is_bound]
+            else:
+                order = [args.mac]
+            macs = tx.set_led_merge(
+                effect,
+                order,
+                reversed_macs=[
+                    m.strip() for m in (args.reverse or "").split(",") if m.strip()
+                ],
+                brightness=args.effect_brightness,
+                direction=int(args.effect_direction),
+                speed=args.speed,
+                colours=colours,
+                interval_ms=args.interval_ms,
+            )
+    except wireless.WirelessError as exc:
+        raise SystemExit(str(exc))
+    _emit_output(
+        args,
+        {"mode": "merge", "effect": effect.name, "order": macs, "speed": args.speed},
+        text=f"Applied merged {effect.name} across {', '.join(macs)}",
+    )
+
+
+def _plain_interval(args: argparse.Namespace) -> int:
+    return max(1, args.interval_ms or 50)
+
+
+def _effect_interval(args: argparse.Namespace, effect: tl_effects.TLEffects) -> int:
+    if args.interval_ms:
+        return max(1, args.interval_ms)
+    return tl_effects.effect_interval(effect, args.speed)
+
+
+def _ensure_pwm_values(args) -> list[int]:
     if args.pwm_list:
         try:
             values = [
@@ -504,7 +641,9 @@ def handle_lcd(args: argparse.Namespace) -> None:
                 )
             elif args.command == "play-video":
                 if not device.is_wireless:
-                    raise SystemExit("play-video is supported only on the TL Wireless LCD")
+                    raise SystemExit(
+                        "play-video is supported only on the TL Wireless LCD"
+                    )
                 if not args.file.exists():
                     raise SystemExit(f"File not found: {args.file}")
                 fps = args.fps or lcd.video_frame_rate(str(args.file))
@@ -603,6 +742,10 @@ def handle_fan(args: argparse.Namespace) -> None:
                         "fan_pwm": list(dev.pwm_values),
                         "fan_rpm": list(dev.fan_rpm),
                         "bound": dev.is_bound,
+                        "fans_type": list(dev.fans_type),
+                        "rf_version": dev.rf_version,
+                        "effect_index": dev.effect_index.hex(),
+                        "mb_light_sync": dev.mb_light_sync,
                     }
                     for dev in snapshot.devices
                 ]
@@ -616,7 +759,7 @@ def handle_fan(args: argparse.Namespace) -> None:
             raise SystemExit(str(exc))
 
     if args.command == "list-masters":
-        master_query: tuple[str, Optional[int]] | None = None
+        master_query: tuple[str, int | None] | None = None
         try:
             with wireless.WirelessTransceiver() as tx:
                 snapshot = tx.list_devices()
@@ -626,9 +769,9 @@ def handle_fan(args: argparse.Namespace) -> None:
                     master_query = None
         except wireless.WirelessError as exc:
             raise SystemExit(str(exc))
-        masters: Dict[str, Dict[str, Any]] = {}
+        masters: dict[str, dict[str, Any]] = {}
 
-        def ensure_entry(master_mac: str) -> Dict[str, Any]:
+        def ensure_entry(master_mac: str) -> dict[str, Any]:
             key = master_mac.lower()
             entry = masters.get(key)
             if entry is None:
@@ -642,7 +785,7 @@ def handle_fan(args: argparse.Namespace) -> None:
                 masters[key] = entry
             return entry
 
-        for dev in snapshot.devices:
+        for dev in snapshot.masters + snapshot.devices:
             if dev.device_type == 0xFF:
                 master_key: str | None = None
                 for candidate in (dev.mac, dev.master_mac):
@@ -682,11 +825,9 @@ def handle_fan(args: argparse.Namespace) -> None:
             if master_channel is not None:
                 entry["channel"] = entry["channel"] or master_channel
                 entry["channels"].add(master_channel)
-        masters_payload: List[Dict[str, Any]] = []
+        masters_payload: list[dict[str, Any]] = []
         for entry in masters.values():
-            devices = sorted(
-                entry["devices"], key=lambda item: cast(str, item["mac"])
-            )
+            devices = sorted(entry["devices"], key=lambda item: cast(str, item["mac"]))
             masters_payload.append(
                 {
                     "master_mac": entry["master_mac"],
@@ -719,23 +860,24 @@ def handle_fan(args: argparse.Namespace) -> None:
             with wireless.WirelessTransceiver() as tx:
                 if args.all:
                     snapshot = tx.list_devices()
-                    pwm_devices = [dev for dev in snapshot.devices if dev.is_bound]
+                    pwm_devices = [d for d in snapshot.devices if d.is_bound]
                     if not pwm_devices:
                         raise SystemExit("No bound wireless devices found")
-                    pwm_target_macs: List[str] = []
+                    pwm_target_macs: list[str] = []
                     for dev in pwm_devices:
                         tx.set_pwm_direct(
                             dev,
                             pwm_values,
                             sequence_index=args.sequence_index,
                             label=dev.mac,
+                            snapshot=snapshot,
                         )
                         pwm_target_macs.append(dev.mac)
                 else:
                     tx.set_pwm(args.mac, pwm_values, sequence_index=args.sequence_index)
                     pwm_target_macs = [args.mac]
             if args.all:
-                result_payload: Dict[str, Any] = {
+                result_payload: dict[str, Any] = {
                     "macs": pwm_target_macs,
                     "count": len(pwm_target_macs),
                     "pwm": list(pwm_values),
@@ -754,27 +896,43 @@ def handle_fan(args: argparse.Namespace) -> None:
         except wireless.WirelessError as exc:
             raise SystemExit(str(exc))
 
+    merge_order = args.command == "set-led" and args.mode == "merge" and args.order
+    if args.command == "set-led" and not (args.mac or args.all or merge_order):
+        raise SystemExit(
+            "set-led needs --mac or --all (merge mode: or --order mac1,mac2,...)"
+        )
+
+    if args.command == "set-led" and args.mode == "merge":
+        _set_led_merge(args)
+        return
+
     if args.command == "set-led":
         try:
             if args.all:
                 with wireless.WirelessTransceiver() as tx:
                     snapshot = tx.list_devices()
-                    targets: List[str] = [
-                        dev.mac for dev in snapshot.devices if dev.is_bound
+                    targets: list[str] = [
+                        dev.mac for dev in [d for d in snapshot.devices if d.is_bound]
                     ]
                     if not targets:
                         raise SystemExit("No bound wireless devices found")
             else:
                 targets = [args.mac]
-            results: List[Dict[str, Any]] = []
+            results: list[dict[str, Any]] = []
             last_text: str = ""
-            selected_random_effect: Optional[tl_effects.TLEffects] = None
+            selected_random_effect: tl_effects.TLEffects | None = None
+            effect_colours = _effect_colours_arg(args)
             if args.mode == "random-effect":
-                selected_random_effect = random.choice(list(tl_effects.TLEffects))
+                choices = [
+                    e
+                    for e in tl_effects.TLEffects
+                    if not (effect_colours and e in tl_effects.PRERENDERED)
+                ]
+                selected_random_effect = random.choice(choices)
             with wireless.WirelessTransceiver() as tx:
                 for mac in targets:
                     entry_text: str
-                    entry_data: Dict[str, Any]
+                    entry_data: dict[str, Any]
                     if args.mode == "static":
                         colors: list[tuple[int, int, int]] | None = None
                         if args.color_list:
@@ -803,7 +961,7 @@ def handle_fan(args: argparse.Namespace) -> None:
                         entry_text = f"Applied static LED effect to {mac}"
                     elif args.mode == "rainbow":
                         frames = max(1, args.frames)
-                        interval_ms = max(1, args.interval_ms)
+                        interval_ms = _plain_interval(args)
                         tx.set_led_rainbow(
                             mac,
                             frames=frames,
@@ -830,7 +988,7 @@ def handle_fan(args: argparse.Namespace) -> None:
                             tb = 1
                         else:
                             tb = None
-                        interval_ms = max(1, args.interval_ms)
+                        interval_ms = _effect_interval(args, effect)
                         tx.set_led_effect(
                             mac,
                             effect,
@@ -838,6 +996,8 @@ def handle_fan(args: argparse.Namespace) -> None:
                             brightness=brightness,
                             direction=direction,
                             interval_ms=interval_ms,
+                            colours=effect_colours,
+                            flip=args.flip,
                         )
                         entry_data = {
                             "mac": mac,
@@ -861,7 +1021,7 @@ def handle_fan(args: argparse.Namespace) -> None:
                         effect = selected_random_effect or random.choice(
                             list(tl_effects.TLEffects)
                         )
-                        interval_ms = max(1, args.interval_ms)
+                        interval_ms = _effect_interval(args, effect)
                         tx.set_led_effect(
                             mac,
                             effect,
@@ -869,6 +1029,8 @@ def handle_fan(args: argparse.Namespace) -> None:
                             brightness=brightness,
                             direction=direction,
                             interval_ms=interval_ms,
+                            colours=effect_colours,
+                            flip=args.flip,
                         )
                         entry_data = {
                             "mac": mac,
@@ -886,7 +1048,7 @@ def handle_fan(args: argparse.Namespace) -> None:
                                 "--frames-file is required for frames mode"
                             )
                         frame_list = _load_frames_file(args.frames_file)
-                        interval_ms = max(1, args.interval_ms)
+                        interval_ms = _plain_interval(args)
                         tx.set_led_frames(
                             mac,
                             frame_list,
@@ -901,13 +1063,13 @@ def handle_fan(args: argparse.Namespace) -> None:
                         entry_text = f"Applied custom LED frames to {mac}"
                     results.append(entry_data)
                     last_text = entry_text
-            overall: Dict[str, Any] = {
+            overall: dict[str, Any] = {
                 "targets": targets,
                 "mode": args.mode,
             }
             if args.mode == "rainbow":
                 overall["frames"] = max(1, args.frames)
-                overall["interval_ms"] = max(1, args.interval_ms)
+                overall["interval_ms"] = _plain_interval(args)
             elif args.mode in {"effect", "random-effect"}:
                 if args.mode == "random-effect":
                     overall["effect"] = (
@@ -915,10 +1077,10 @@ def handle_fan(args: argparse.Namespace) -> None:
                     )
                 else:
                     overall["effect"] = args.effect.upper() if args.effect else None
-                overall["interval_ms"] = max(1, args.interval_ms)
+                overall["speed"] = args.speed
             elif args.mode == "frames":
                 overall["frames_file"] = str(args.frames_file)
-                overall["interval_ms"] = max(1, args.interval_ms)
+                overall["interval_ms"] = _plain_interval(args)
             overall["details"] = results
             joined_text = "\n".join(json.dumps(entry) for entry in results)
             if len(targets) == 1:
@@ -953,6 +1115,44 @@ def handle_fan(args: argparse.Namespace) -> None:
             return
         except wireless.WirelessError as exc:
             raise SystemExit(str(exc))
+
+    if args.command in ("identify", "reboot-lcd"):
+        try:
+            with wireless.WirelessTransceiver() as tx:
+                if args.command == "identify":
+                    confirmed = tx.identify(args.mac)
+                else:
+                    confirmed = tx.reboot_lcd(args.mac)
+        except wireless.WirelessError as exc:
+            raise SystemExit(str(exc))
+        verb = "Identify" if args.command == "identify" else "LCD restart"
+        _emit_output(
+            args,
+            {"mac": args.mac, "command": args.command, "confirmed": confirmed},
+            text=f"{verb} sent to {args.mac}"
+            + ("" if confirmed else " (the device did not confirm it)"),
+        )
+        if not confirmed:
+            raise SystemExit(1)
+        return
+
+    if args.command == "set-channel":
+        try:
+            with wireless.WirelessTransceiver() as tx:
+                moved = tx.set_channel(args.channel)
+        except wireless.WirelessError as exc:
+            raise SystemExit(str(exc))
+        _emit_output(
+            args,
+            {"channel": args.channel, "results": moved},
+            text="\n".join(
+                f"{mac}: " + (f"on channel {args.channel}" if ok else "not moved")
+                for mac, ok in moved.items()
+            ),
+        )
+        if not all(moved.values()):
+            raise SystemExit(1)
+        return
 
     if args.command == "unbind":
         try:
@@ -989,17 +1189,33 @@ def handle_fan(args: argparse.Namespace) -> None:
             pwm_values = [6, 6, 6, 6]
             try:
                 with wireless.WirelessTransceiver() as tx:
-                    receiver_macs: List[str]
+                    receiver_macs: list[str]
                     if args.mac:
-                        tx.set_pwm(args.mac, pwm_values, sequence_index=args.sequence_index)
+                        if not wireless.follows_motherboard_itself(args.mac):
+                            raise SystemExit(
+                                f"{args.mac} cannot follow the motherboard by itself "
+                                "(the vendor app does this only for MACs ending in e1); "
+                                "use --mode controller"
+                            )
+                        tx.set_pwm(
+                            args.mac, pwm_values, sequence_index=args.sequence_index
+                        )
                         receiver_macs = [args.mac]
                     else:
                         snapshot = tx.list_devices()
+                        bound = [d for d in snapshot.devices if d.is_bound]
+                        if not bound:
+                            raise SystemExit("No bound wireless devices found")
                         receiver_targets = [
-                            dev for dev in snapshot.devices if dev.is_bound
+                            dev
+                            for dev in bound
+                            if wireless.follows_motherboard_itself(dev.mac)
                         ]
                         if not receiver_targets:
-                            raise SystemExit("No bound wireless devices found")
+                            raise SystemExit(
+                                "None of the bound devices can follow the motherboard by itself; "
+                                "use --mode controller"
+                            )
                         receiver_macs = []
                         for dev in receiver_targets:
                             tx.set_pwm_direct(
@@ -1007,17 +1223,17 @@ def handle_fan(args: argparse.Namespace) -> None:
                                 pwm_values,
                                 sequence_index=args.sequence_index,
                                 label=dev.mac,
+                                snapshot=snapshot,
                             )
                             receiver_macs.append(dev.mac)
-                receiver_payload: Dict[str, Any] = {
+                receiver_payload: dict[str, Any] = {
                     "targets": receiver_macs,
                     "mode": "receiver",
                     "pwm": pwm_values,
                     "sequence_index": args.sequence_index,
                 }
-                text = (
-                    "Enabled motherboard PWM sync (receiver mode) for "
-                    + ", ".join(receiver_macs)
+                text = "Enabled motherboard PWM sync (receiver mode) for " + ", ".join(
+                    receiver_macs
                 )
                 _emit_output(args, receiver_payload, text=text)
                 return
@@ -1026,20 +1242,22 @@ def handle_fan(args: argparse.Namespace) -> None:
 
         if not args.mac and not args.all:
             args.all = True
-        controller_targets: List[str]
+        controller_targets: list[str]
         if args.mac:
             controller_targets = [args.mac]
         else:
             with wireless.WirelessTransceiver() as tx:
                 snapshot = tx.list_devices()
-            controller_targets = [dev.mac for dev in snapshot.devices if dev.is_bound]
+                controller_targets = [
+                    dev.mac for dev in [d for d in snapshot.devices if d.is_bound]
+                ]
             if not controller_targets:
                 raise SystemExit("No bound wireless devices found")
         interval = max(args.interval, 0.1)
         try:
             tlcontroller.set_motherboard_rpm_sync(True)
             status = "once" if args.once else "running"
-            controller_payload: Dict[str, Any] = {
+            controller_payload: dict[str, Any] = {
                 "targets": controller_targets,
                 "interval": interval,
                 "status": status,

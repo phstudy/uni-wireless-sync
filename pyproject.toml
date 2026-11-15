@@ -49,7 +49,7 @@ where = ["src"]
 include = ["uwscli", "uwscli.*"]
 
 [tool.setuptools.package-data]
-"uwscli" = ["data/twinkle.bin"]
+"uwscli" = ["data/twinkle.bin", "data/tl_frames/*.xz"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

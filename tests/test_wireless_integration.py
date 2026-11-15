@@ -1,3 +1,5 @@
+from typing import ClassVar
+
 import pytest
 
 from uwscli import wireless
@@ -31,6 +33,7 @@ class _FakeUSBDevice:
         self._read_consumed = False
         self.writes: list[bytes] = []
         self.closed = False
+        self._last_write = b""
 
     def write(self, data: bytes | bytearray):
         if self.role == "sender":
@@ -40,6 +43,8 @@ class _FakeUSBDevice:
         self._last_write = bytes(data)
 
     def read(self, size: int) -> bytes:
+        if self.role == "sender" and self._last_write[:1] == b"\x11":
+            return b"\x11" + bytes.fromhex("112233445566") + bytes(57)
         if self.role != "receiver" or self._read_consumed:
             return b""
         self._read_consumed = True
@@ -77,9 +82,11 @@ def test_set_pwm_uses_usb_sender(fake_usb):
     with wireless.WirelessTransceiver() as tx:
         tx.set_pwm("aa:bb:cc:dd:ee:ff", [120, 121, 122, 123])
 
-    # Four 60-byte chunks pushed through the sender
-    assert len(sender.writes) == 4
-    first_chunk = sender.writes[0]
+    # Four 60-byte chunks pushed through the sender (after the master MAC query)
+    chunks = [w for w in sender.writes if w[0] == wireless.RF_PACKET_HEADER]
+    assert len(chunks) == 4
+    first_chunk = chunks[0]
+    assert first_chunk[4 + 15] == 3  # the channel of the device's master
     assert first_chunk[0] == wireless.RF_PACKET_HEADER
     pwm_bytes = first_chunk[4 + 17 : 4 + 21]
     assert pwm_bytes == bytes([120, 121, 122, 123])
@@ -88,9 +95,10 @@ def test_set_pwm_uses_usb_sender(fake_usb):
 def test_set_pwm_sync_enable_emits_sentinel(fake_usb):
     sender, _ = fake_usb
     with wireless.WirelessTransceiver() as tx:
-        tx.set_pwm_sync("aa:bb:cc:dd:ee:ff", enable=True)
+        tx.set_pwm_sync("aa:bb:cc:dd:ee:ff", enable=False, fallback_pwm=6)
 
-    pwm_bytes = sender.writes[0][4 + 17 : 4 + 21]
+    chunks = [w for w in sender.writes if w[0] == wireless.RF_PACKET_HEADER]
+    pwm_bytes = chunks[0][4 + 17 : 4 + 21]
     assert pwm_bytes == bytes([6, 6, 6, 6])
 
 
@@ -117,7 +125,7 @@ def test_run_pwm_sync_loop_sends_updates(monkeypatch):
     snapshot = wireless.WirelessSnapshot(devices=[device], raw=pwm_raw)
 
     class LoopStub:
-        instances = []
+        instances: ClassVar[list] = []
 
         def __init__(self):
             self.sent = []
@@ -129,10 +137,13 @@ def test_run_pwm_sync_loop_sends_updates(monkeypatch):
         def __exit__(self, exc_type, exc, tb):
             return False
 
+        def local_master(self, snapshot=None):
+            return wireless.LocalMaster(mac="11:22:33:44:55:66", channel=3)
+
         def list_devices(self):
             return snapshot
 
-        def set_pwm_direct(self, target, pwm_values, sequence_index=1, **kwargs):
+        def set_pwm_direct(self, target, pwm_values, sequence_index=None, **kwargs):
             self.sent.append(
                 {
                     "mac": target.mac,
@@ -152,7 +163,7 @@ def test_run_pwm_sync_loop_sends_updates(monkeypatch):
         {
             "mac": "aa:bb:cc:dd:ee:ff",
             "pwm": (191, 191, 191, 191),
-            "sequence": (device.command_sequence + 1) & 0xFF,
+            "sequence": None,
         }
     ]
 
@@ -174,13 +185,16 @@ def test_run_pwm_sync_loop_skips_when_no_pwm(monkeypatch):
     snapshot = wireless.WirelessSnapshot(devices=[device], raw=raw_missing)
 
     class SkipStub:
-        calls = []
+        calls: ClassVar[list] = []
 
         def __enter__(self):
             return self
 
         def __exit__(self, exc_type, exc, tb):
             return False
+
+        def local_master(self, snapshot=None):
+            return wireless.LocalMaster(mac="11:22:33:44:55:66", channel=3)
 
         def list_devices(self):
             return snapshot
@@ -219,7 +233,7 @@ def test_run_pwm_sync_loop_reuses_previous_pwm(monkeypatch):
     ]
 
     class ReuseStub:
-        sent = []
+        sent: ClassVar[list] = []
 
         def __enter__(self):
             return self
@@ -227,12 +241,15 @@ def test_run_pwm_sync_loop_reuses_previous_pwm(monkeypatch):
         def __exit__(self, exc_type, exc, tb):
             return False
 
+        def local_master(self, snapshot=None):
+            return wireless.LocalMaster(mac="11:22:33:44:55:66", channel=3)
+
         def list_devices(self):
             if snapshots:
                 return snapshots.pop(0)
             return wireless.WirelessSnapshot(devices=[device], raw=raw_missing)
 
-        def set_pwm_direct(self, target, pwm_values, sequence_index=1, **kwargs):
+        def set_pwm_direct(self, target, pwm_values, sequence_index=None, **kwargs):
             ReuseStub.sent.append(
                 {
                     "mac": target.mac,
@@ -252,7 +269,7 @@ def test_run_pwm_sync_loop_reuses_previous_pwm(monkeypatch):
         {
             "mac": "aa:bb:cc:dd:ee:ff",
             "pwm": (191, 191, 191, 191),
-            "sequence": (device.command_sequence + 1) & 0xFF,
+            "sequence": None,
         }
     ]
 
@@ -279,7 +296,7 @@ def test_run_pwm_sync_loop_stop_after_first(monkeypatch):
     ]
 
     class StopStub:
-        sent = []
+        sent: ClassVar[list] = []
 
         def __enter__(self):
             return self
@@ -287,12 +304,15 @@ def test_run_pwm_sync_loop_stop_after_first(monkeypatch):
         def __exit__(self, exc_type, exc, tb):
             return False
 
+        def local_master(self, snapshot=None):
+            return wireless.LocalMaster(mac="11:22:33:44:55:66", channel=3)
+
         def list_devices(self):
             if snapshots:
                 return snapshots.pop(0)
             return wireless.WirelessSnapshot(devices=[device], raw=pwm_raw2)
 
-        def set_pwm_direct(self, target, pwm_values, sequence_index=1, **kwargs):
+        def set_pwm_direct(self, target, pwm_values, sequence_index=None, **kwargs):
             StopStub.sent.append(
                 {
                     "mac": target.mac,
@@ -316,6 +336,6 @@ def test_run_pwm_sync_loop_stop_after_first(monkeypatch):
         {
             "mac": "aa:bb:cc:dd:ee:ff",
             "pwm": (191, 191, 191, 191),
-            "sequence": (device.command_sequence + 1) & 0xFF,
+            "sequence": None,
         }
     ]

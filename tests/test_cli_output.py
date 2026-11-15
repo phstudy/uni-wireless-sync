@@ -1,18 +1,19 @@
 import json
 import sys
 from pathlib import Path
+from typing import ClassVar
 
 SRC_ROOT = Path(__file__).resolve().parents[1].parent / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from uwscli import cli, lcd, tl_effects, tlcontroller, wireless  # noqa: E402
+from uwscli import cli, lcd, tl_effects, tlcontroller, wireless
 
 
 class StubTransceiver:
     """Context manager used to capture commands flowing through the CLI."""
 
-    instances: list["StubTransceiver"] = []
+    instances: ClassVar[list["StubTransceiver"]] = []
 
     def __init__(self, snapshot=None, *, master_mac=None, master_channel=8):
         self.snapshot = snapshot
@@ -39,12 +40,25 @@ class StubTransceiver:
             )
         return self.snapshot
 
+    def local_master(self, snapshot=None):
+        snap = snapshot or self.snapshot
+        mac = self.master_mac
+        if mac is None and snap is not None:
+            mac = next(
+                (d.master_mac for d in snap.devices if d.is_bound), "00:00:00:00:00:00"
+            )
+        return wireless.LocalMaster(
+            mac=mac or "00:00:00:00:00:00", channel=self.master_channel or 8
+        )
+
     def query_master_mac(self, channel=None):
         if self.master_mac is None:
             return None
         requested_channel = 8 if channel is None else channel
         channel_to_return = (
-            self.master_channel if self.master_channel is not None else requested_channel
+            self.master_channel
+            if self.master_channel is not None
+            else requested_channel
         )
         return self.master_mac, channel_to_return
 
@@ -97,7 +111,7 @@ class StubTransceiver:
             }
         )
 
-    def set_pwm(self, mac, pwm_values, sequence_index=1):
+    def set_pwm(self, mac, pwm_values, sequence_index=None):
         self.pwm_calls.append(
             {
                 "type": "set_pwm",
@@ -112,8 +126,9 @@ class StubTransceiver:
         target,
         pwm_values,
         *,
-        sequence_index=1,
+        sequence_index=None,
         label=None,
+        snapshot=None,
     ):
         self.pwm_calls.append(
             {
@@ -381,9 +396,7 @@ def test_fan_list_masters_json_output(monkeypatch, capsys):
         command_sequence=6,
         raw=bytes(42),
     )
-    snapshot = wireless.WirelessSnapshot(
-        devices=[device_b, device_a, master], raw=b""
-    )
+    snapshot = wireless.WirelessSnapshot(devices=[device_b, device_a, master], raw=b"")
 
     def factory(*args, **kwargs):
         return StubTransceiver(snapshot=snapshot)
@@ -561,13 +574,13 @@ def test_fan_set_fan_all_cli(monkeypatch, capsys):
     assert macs == ["aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"]
     for call in stub.pwm_calls:
         assert call["pwm"] == [150, 150, 150, 150]
-        assert call["sequence_index"] == 1
+        assert call["sequence_index"] is None
 
 
 def test_fan_set_fan_sync_cli(monkeypatch, capsys):
     StubTransceiver.instances.clear()
     device = wireless.WirelessDeviceInfo(
-        mac="aa:bb:cc:dd:ee:ff",
+        mac="aa:bb:cc:dd:ee:e1",
         master_mac="11:22:33:44:55:66",
         channel=3,
         rx_type=2,
@@ -585,7 +598,7 @@ def test_fan_set_fan_sync_cli(monkeypatch, capsys):
 
     monkeypatch.setattr(wireless, "WirelessTransceiver", factory)
 
-    cli.main(["fan", "pwm-sync", "--mode", "receiver", "--mac", "aa:bb:cc:dd:ee:ff"])
+    cli.main(["fan", "pwm-sync", "--mode", "receiver", "--mac", "aa:bb:cc:dd:ee:e1"])
 
     out = capsys.readouterr().out.strip()
     assert "Enabled motherboard PWM sync (receiver mode)" in out
@@ -593,9 +606,9 @@ def test_fan_set_fan_sync_cli(monkeypatch, capsys):
     assert stub.pwm_calls == [
         {
             "type": "set_pwm",
-            "mac": "aa:bb:cc:dd:ee:ff",
+            "mac": "aa:bb:cc:dd:ee:e1",
             "pwm": [6, 6, 6, 6],
-            "sequence_index": 1,
+            "sequence_index": None,
         }
     ]
 
@@ -649,7 +662,7 @@ def test_fan_set_fan_custom_sequence_index(monkeypatch, capsys):
 def test_fan_set_fan_all_sync_cli(monkeypatch, capsys):
     StubTransceiver.instances.clear()
     device_bound_a = wireless.WirelessDeviceInfo(
-        mac="aa:bb:cc:dd:ee:01",
+        mac="aa:bb:cc:dd:01:e1",
         master_mac="11:22:33:44:55:66",
         channel=3,
         rx_type=1,
@@ -661,7 +674,7 @@ def test_fan_set_fan_all_sync_cli(monkeypatch, capsys):
         raw=bytes(42),
     )
     device_bound_b = wireless.WirelessDeviceInfo(
-        mac="aa:bb:cc:dd:ee:02",
+        mac="aa:bb:cc:dd:02:e1",
         master_mac="11:22:33:44:55:66",
         channel=4,
         rx_type=2,
@@ -687,16 +700,16 @@ def test_fan_set_fan_all_sync_cli(monkeypatch, capsys):
     assert "Enabled motherboard PWM sync (receiver mode)" in out
     stub = StubTransceiver.instances[-1]
     macs = [call["mac"] for call in stub.pwm_calls]
-    assert macs == ["aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"]
+    assert macs == ["aa:bb:cc:dd:01:e1", "aa:bb:cc:dd:02:e1"]
     for call in stub.pwm_calls:
         assert call["pwm"] == [6, 6, 6, 6]
-        assert call["sequence_index"] == 1
+        assert call["sequence_index"] is None
 
 
 def test_fan_pwm_sync_receiver_sequence_index(monkeypatch, capsys):
     StubTransceiver.instances.clear()
     device = wireless.WirelessDeviceInfo(
-        mac="aa:bb:cc:dd:ee:ff",
+        mac="aa:bb:cc:dd:ee:e1",
         master_mac="11:22:33:44:55:66",
         channel=3,
         rx_type=2,
@@ -721,7 +734,7 @@ def test_fan_pwm_sync_receiver_sequence_index(monkeypatch, capsys):
             "--mode",
             "receiver",
             "--mac",
-            "aa:bb:cc:dd:ee:ff",
+            "aa:bb:cc:dd:ee:e1",
             "--sequence-index",
             "5",
         ]
@@ -732,7 +745,7 @@ def test_fan_pwm_sync_receiver_sequence_index(monkeypatch, capsys):
     assert stub.pwm_calls == [
         {
             "type": "set_pwm",
-            "mac": "aa:bb:cc:dd:ee:ff",
+            "mac": "aa:bb:cc:dd:ee:e1",
             "pwm": [6, 6, 6, 6],
             "sequence_index": 5,
         }
@@ -1198,3 +1211,18 @@ def test_lcd_info_autodetects_single_serial(monkeypatch, capsys):
     payload = json.loads(capsys.readouterr().out.strip())
     assert payload["handshake"]["mode"] == 2
     assert calls == ["detected123"]
+
+
+def test_pwm_sync_receiver_refuses_devices_that_cannot_follow(monkeypatch):
+    StubTransceiver.instances.clear()
+    monkeypatch.setattr(
+        wireless, "WirelessTransceiver", lambda *a, **k: StubTransceiver()
+    )
+    import pytest
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(
+            ["fan", "pwm-sync", "--mode", "receiver", "--mac", "aa:bb:cc:dd:ee:ff"]
+        )
+    assert "--mode controller" in str(exc.value)
+    assert StubTransceiver.instances[-1].pwm_calls == []

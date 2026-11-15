@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Iterable, Tuple, cast
+from typing import cast
 
 
 class LCDControlMode(Enum):
@@ -23,7 +24,7 @@ class ScreenRotation(Enum):
     ROTATE_270 = 3
 
     @staticmethod
-    def from_degrees(degrees: int) -> "ScreenRotation":
+    def from_degrees(degrees: int) -> ScreenRotation:
         mapping = {
             0: ScreenRotation.ROTATE_0,
             90: ScreenRotation.ROTATE_90,
@@ -43,7 +44,7 @@ class LCDControlSetting:
     video_fps: int = 30
     rotation: ScreenRotation = ScreenRotation.ROTATE_0
     enable_test: bool = False
-    test_color: Tuple[int, int, int] = (0, 0, 0)
+    test_color: tuple[int, int, int] = (0, 0, 0)
 
     def to_bytes(self) -> bytes:
         if not 0 <= self.jpg_index <= 0xFFFF:
@@ -78,14 +79,25 @@ class WirelessDeviceInfo:
     rx_type: int
     device_type: int
     fan_count: int
-    pwm_values: Tuple[int, int, int, int]
-    fan_rpm: Tuple[int, int, int, int]
+    pwm_values: tuple[int, int, int, int]
+    fan_rpm: tuple[int, int, int, int]
     command_sequence: int
     raw: bytes
+    effect_index: bytes = b"\x00\x00\x00\x00"  # LED effect the device is running
+    fans_type: tuple[int, int, int, int] = (0, 0, 0, 0)
+    rf_version: int = 0
+    sync_line: bool = False  # flags from the high nibble of the first RPM byte
+    mb_light_sync: bool = False
+    pwm_line: bool = False
+    fg_line: bool = False
 
     @property
     def is_bound(self) -> bool:
         return any(part != "00" for part in self.master_mac.split(":"))
+
+    @property
+    def is_master(self) -> bool:
+        return self.device_type == 0xFF
 
     def pretty_rpm(self) -> str:
         values = [rpm for rpm in self.fan_rpm if rpm > 0]
@@ -95,7 +107,7 @@ class WirelessDeviceInfo:
         return ",".join(str(v) for v in self.pwm_values)
 
 
-def clamp_pwm_values(values: Iterable[int]) -> Tuple[int, int, int, int]:
+def clamp_pwm_values(values: Iterable[int]) -> tuple[int, int, int, int]:
     result = []
     for value in values:
         if value < 0:
@@ -105,4 +117,4 @@ def clamp_pwm_values(values: Iterable[int]) -> Tuple[int, int, int, int]:
         result.append(int(value))
     while len(result) < 4:
         result.append(result[-1] if result else 0)
-    return cast(Tuple[int, int, int, int], tuple(result[:4]))
+    return cast(tuple[int, int, int, int], tuple(result[:4]))
