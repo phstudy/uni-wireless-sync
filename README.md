@@ -19,6 +19,7 @@ Other Uni Fan series are currently not supported.
 - Query LCD firmware and the panel's group index.
 - Show images (JPEG or PNG, scaled to the panel) or play videos on the TL Wireless LCD, optionally keeping an image as the power-on image.
 - Set LCD brightness and rotation.
+- Show live sensor gauges (CPU/GPU temperature and load, fan speed) or a clock on the TL Wireless LCD.
 - Keep the wireless TL LCD awake with the same heartbeat the vendor app sends.
 - List wireless fan receivers with metadata (MAC, master MAC, channel, device type, fan speeds, PWM targets, fan types, RF firmware version, running LED effect).
 - List detected master controller MAC addresses to simplify binding workflows.
@@ -27,6 +28,8 @@ Other Uni Fan series are currently not supported.
 - Make a device flash to find it, or restart the LCD panels of a TL Wireless LCD fan over RF.
 - Toggle motherboard PWM sync mode for one receiver or every bound receiver.
 - Send LED effects to wireless receivers; the CLI waits until the device reports the new effect and resends it if needed.
+- All 29 TL effects with the vendor app's colours, speeds and brightness levels, and merge mode (one effect running across fan groups).
+- Move every bound device to another RF channel.
 
 ### Fan wiring modes
 
@@ -65,6 +68,7 @@ uws lcd send-jpg --serial <usb-serial> --file photo.png --save   # also keep it 
 uws lcd play-video --serial <usb-serial> --file clip.mp4 --loop
 uws lcd control --serial <usb-serial> --brightness 40 --rotation 90
 uws lcd keep-alive --serial <usb-serial>
+uws lcd sensor --serial <usb-serial> --metric cpu-temp --color blue
 
 # Fan receiver operations
 uws fan set-fan --mac aa:bb:cc:dd:ee:ff --pwm 120  # direct PWM control
@@ -73,6 +77,12 @@ uws fan bind --mac aa:bb:cc:dd:ee:ff
 uws fan unbind --mac aa:bb:cc:dd:ee:ff
 uws fan identify --mac aa:bb:cc:dd:ee:ff          # the device flashes
 uws fan reboot-lcd --mac aa:bb:cc:dd:ee:ff
+uws fan set-channel --channel 7
+
+# Lighting
+uws fan set-led --all --mode static --color 255,0,0
+uws fan set-led --all --mode effect --effect meteor --speed 3
+uws fan set-led --all --mode merge --effect wave
 uws fan pwm-sync --all
 uws fan pwm-sync --mac aa:bb:cc:dd:ee:ff --once
 ```
