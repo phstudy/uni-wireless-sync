@@ -25,7 +25,7 @@ dependencies = [
   "hidapi>=0.14",
   "pyusb>=1.2",
   "pycryptodomex>=3.17",
-  "Pillow>=10.0",
+  "Pillow>=10.1",  # ImageFont.load_default(size=...) for the sensor screens
 ]
 
 [project.optional-dependencies]

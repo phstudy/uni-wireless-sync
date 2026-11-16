@@ -173,20 +173,7 @@ class WirelessTransceiver:
         self.close()
 
     def list_devices(self) -> WirelessSnapshot:
-        logger.debug("Requesting wireless device list")
-        page_count = 1
-        snapshot = self._fetch_page(page_count)
-        expected_pages = max(1, math.ceil(snapshot[0] / MAX_DEVICES_PER_PAGE))
-        if expected_pages != page_count:
-            snapshot = self._fetch_page(expected_pages)
-        device_count, payload = snapshot
-        records = self._parse_devices(device_count, payload)
-        devices = [d for d in records if not d.is_master]
-        masters = [d for d in records if d.is_master]
-        logger.debug(
-            "Discovered %d wireless device(s), %d master(s)", len(devices), len(masters)
-        )
-        return WirelessSnapshot(devices=devices, raw=payload, masters=masters)
+        return _list_devices(self._receiver)
 
     def local_master(self, snapshot: WirelessSnapshot | None = None) -> LocalMaster:
         """MAC of the attached master and the channel it uses (its own list record)."""
@@ -863,39 +850,6 @@ class WirelessTransceiver:
             pwm_values = clamp_pwm_values([fallback_pwm] * 4)
         self.set_pwm_direct(target, pwm_values, label=mac, snapshot=snapshot)
 
-    def _fetch_page(self, page_count: int) -> tuple[int, bytes]:
-        command = bytearray(64)
-        command[0] = RF_GET_DEV_CMD
-        command[1] = page_count & 0xFF
-        self._receiver.write(command)
-        total_len = RF_PAGE_STRIDE * page_count
-        buffer = bytearray()
-        request_size = 512
-        while len(buffer) < total_len:
-            try:
-                chunk = self._receiver.read(request_size)
-            except USBError as exc:
-                message = str(exc).lower()
-                if "overflow" in message and request_size < 2048:
-                    request_size *= 2
-                    continue
-                raise
-            if not chunk:
-                break
-            buffer.extend(chunk)
-            if len(chunk) < request_size:
-                break
-        if not buffer:
-            raise WirelessError("RF receiver returned no data")
-        buffer = buffer[:total_len]
-        if not buffer or buffer[0] != RF_GET_DEV_CMD:
-            raise WirelessError(f"Unexpected RF response header 0x{buffer[0]:02x}")
-        device_count = buffer[1]
-        return device_count, bytes(buffer)
-
-    def _parse_devices(self, count: int, payload: bytes) -> list[WirelessDeviceInfo]:
-        return parse_device_records(count, payload)
-
     def _send_rf_data(self, channel: int, rx: int, payload: bytes | bytearray) -> None:
         if len(payload) != RF_PAYLOAD_SIZE:
             raise WirelessError(f"RF payload must be {RF_PAYLOAD_SIZE} bytes")
@@ -915,6 +869,69 @@ class WirelessTransceiver:
             chunk_index += RF_CHUNK_SIZE
             sequence = (sequence + 1) & 0xFF
             time.sleep(0.002)
+
+
+def _fetch_page(receiver: USBEndpointDevice, page_count: int) -> tuple[int, bytes]:
+    command = bytearray(64)
+    command[0] = RF_GET_DEV_CMD
+    command[1] = page_count & 0xFF
+    total_len = RF_PAGE_STRIDE * page_count
+    buffer = bytearray()
+    request_size = 512
+    try:
+        receiver.write(command)
+        while len(buffer) < total_len:
+            try:
+                chunk = receiver.read(request_size)
+            except USBError as exc:
+                if "overflow" in str(exc).lower() and request_size < 2048:
+                    request_size *= 2
+                    continue
+                raise
+            if not chunk:
+                break
+            buffer.extend(chunk)
+            if len(chunk) < request_size:
+                break
+    except USBError as exc:
+        # A timeout or a receiver that stops answering mid-read is a wireless error too.
+        raise WirelessError(f"RF receiver: {exc}") from exc
+    if not buffer:
+        raise WirelessError("RF receiver returned no data")
+    buffer = buffer[:total_len]
+    if buffer[0] != RF_GET_DEV_CMD:
+        raise WirelessError(f"Unexpected RF response header 0x{buffer[0]:02x}")
+    return buffer[1], bytes(buffer)
+
+
+def _list_devices(receiver: USBEndpointDevice) -> WirelessSnapshot:
+    """The device list from the RF receiver (fetching more pages when there are many)."""
+    logger.debug("Requesting wireless device list")
+    device_count, payload = _fetch_page(receiver, 1)
+    pages = max(1, math.ceil(device_count / MAX_DEVICES_PER_PAGE))
+    if pages != 1:
+        device_count, payload = _fetch_page(receiver, pages)
+    records = parse_device_records(device_count, payload)
+    devices = [d for d in records if not d.is_master]
+    masters = [d for d in records if d.is_master]
+    logger.debug(
+        "Discovered %d wireless device(s), %d master(s)", len(devices), len(masters)
+    )
+    return WirelessSnapshot(devices=devices, raw=payload, masters=masters)
+
+
+def read_device_list(timeout_ms: int = 1000) -> WirelessSnapshot:
+    """Read the device list through the RF receiver only (the controller stays free)."""
+    try:
+        receiver = USBEndpointDevice(
+            RF_RECEIVER_VID, RF_RECEIVER_PID, timeout_ms=timeout_ms
+        )
+    except USBError as exc:
+        raise WirelessError(str(exc)) from exc
+    try:
+        return _list_devices(receiver)
+    finally:
+        receiver.close()
 
 
 def run_pwm_sync_loop(

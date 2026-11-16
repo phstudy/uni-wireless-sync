@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
+import logging
 import random
 import time
 from collections.abc import Iterable
@@ -11,9 +13,11 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any, cast
 
-from . import lcd, tl_effects, tlcontroller, wireless
+from . import lcd, sensor_screen, sensors, tl_effects, tlcontroller, wireless
 from .logging_utils import configure_logging
 from .structs import LCDControlSetting, ScreenRotation, clamp_pwm_values
+
+logger = logging.getLogger(__name__)
 
 
 def _mac_nonzero(mac: str) -> bool:
@@ -114,6 +118,46 @@ def build_parser() -> argparse.ArgumentParser:
     )
     video_parser.add_argument(
         "--loop", action="store_true", help="Repeat until interrupted (Ctrl+C)"
+    )
+
+    sensor_parser = lcd_sub.add_parser(
+        "sensor",
+        help="Show a live sensor gauge (CPU/GPU temperature or load, fan speed) or a clock",
+    )
+    sensor_parser.add_argument(
+        "--metric",
+        required=True,
+        choices=[*sensors.METRICS, "clock"],
+        help="What to show",
+    )
+    sensor_parser.add_argument(
+        "--serial", required=False, help="USB serial number of the LCD device"
+    )
+    sensor_parser.add_argument(
+        "--color",
+        choices=sorted(sensor_screen.COLOURS),
+        default="blue",
+        help="Accent colour (the vendor app's choices; default: blue)",
+    )
+    sensor_parser.add_argument(
+        "--fan",
+        help="MAC of the fan group for --metric fan-rpm (default: all bound groups)",
+    )
+    sensor_parser.add_argument(
+        "--interval",
+        type=float,
+        default=1.0,
+        help="Seconds between updates (default: 1, as the vendor app)",
+    )
+    sensor_parser.add_argument(
+        "--once", action="store_true", help="Show one update and exit"
+    )
+    sensor_parser.add_argument(
+        "--output",
+        # Not "output": that is the global --output text|json, which this would overwrite.
+        dest="png_output",
+        type=Path,
+        help="Write one frame to this PNG file instead of showing it on a panel",
     )
 
     keep_alive_parser = lcd_sub.add_parser(
@@ -613,6 +657,10 @@ def handle_lcd(args: argparse.Namespace) -> None:
         _emit_output(args, response, text=text)
         return
 
+    if args.command == "sensor":
+        _run_sensor_screen(args)
+        return
+
     serial = _resolve_lcd_serial(getattr(args, "serial", None))
     try:
         with lcd.TLLCDDevice(serial) as device:
@@ -694,6 +742,63 @@ def handle_lcd(args: argparse.Namespace) -> None:
                     print("Keep-alive stopped.")
             else:
                 raise SystemExit("Unknown lcd command")
+    except lcd.LCDDeviceError as exc:
+        raise SystemExit(str(exc))
+
+
+def _sensor_frame(args: argparse.Namespace, reader: Any) -> Any:
+    if args.metric == "clock":
+        return sensor_screen.render_clock(datetime.datetime.now(), args.color)
+    return sensor_screen.render(reader.read(), reader.metric, args.color)
+
+
+def _run_sensor_screen(args: argparse.Namespace) -> None:
+    try:
+        reader = (
+            None
+            if args.metric == "clock"
+            else sensors.SensorReader(args.metric, fan_mac=args.fan)
+        )
+        if args.png_output:
+            _sensor_frame(args, reader).save(args.png_output)
+            _emit_output(
+                args,
+                {"output": str(args.png_output)},
+                text=f"Wrote {args.png_output}",
+            )
+            return
+        serial = _resolve_lcd_serial(args.serial)
+        with lcd.TLLCDDevice(serial) as device:
+            if not device.is_wireless:
+                raise SystemExit("lcd sensor is supported only on the TL Wireless LCD")
+            interval = max(args.interval, 0.2)
+            if not args.once:
+                print(
+                    f"Showing {args.metric} on LCD {serial} every {interval:g}s. Press Ctrl+C to stop.",
+                    flush=True,
+                )
+            shown = False
+            try:
+                while True:
+                    started = time.monotonic()
+                    try:
+                        frame = _sensor_frame(args, reader)
+                    except sensors.SensorError as exc:
+                        if not shown:
+                            raise
+                        # A reading failed once (e.g. a slow nvidia-smi): keep the last
+                        # frame on the panel and try again next time.
+                        logger.warning("Skipping one update: %s", exc)
+                    else:
+                        device.send_jpg(lcd.encode_wireless_jpeg(frame))
+                        shown = True
+                    if args.once:
+                        break
+                    time.sleep(max(0.0, interval - (time.monotonic() - started)))
+            except KeyboardInterrupt:
+                pass
+    except sensors.SensorError as exc:
+        raise SystemExit(str(exc))
     except lcd.LCDDeviceError as exc:
         raise SystemExit(str(exc))
 

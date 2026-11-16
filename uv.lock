@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.10"
 
 [[package]]
@@ -611,10 +611,11 @@ wheels = [
 
 [[package]]
 name = "uwscli"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "." }
 dependencies = [
     { name = "hidapi" },
+    { name = "pillow" },
     { name = "pycryptodomex" },
     { name = "pyusb" },
 ]
@@ -627,20 +628,17 @@ dev = [
     { name = "pytest-cov" },
     { name = "ruff" },
 ]
-images = [
-    { name = "pillow" },
-]
 
 [package.metadata]
 requires-dist = [
     { name = "black", marker = "extra == 'dev'", specifier = ">=24.0" },
     { name = "hidapi", specifier = ">=0.14" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8" },
-    { name = "pillow", marker = "extra == 'images'", specifier = ">=10.0" },
+    { name = "pillow", specifier = ">=10.1" },
     { name = "pycryptodomex", specifier = ">=3.17" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0" },
     { name = "pyusb", specifier = ">=1.2" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },
 ]
-provides-extras = ["dev", "images"]
+provides-extras = ["dev"]
